@@ -2,53 +2,43 @@ package com.mediadrop.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// ── Brand Colors ─────────────────────────────────────────────────────────────
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGray80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// ── DC Brand Palette ────────────────────────────────────────────────────────
+// Deep navy dark theme with gold accents — classic, premium, interactive
 
-val Purple40 = Color(0xFF6650A4)
-val PurpleGray40 = Color(0xFF625B71)
-val Pink40 = Color(0xFF7D5260)
+// Backgrounds
+val Navy950  = Color(0xFF050A14)
+val Navy900  = Color(0xFF0A1628)
+val Navy800  = Color(0xFF0F2040)
+val Navy700  = Color(0xFF162B55)
+val Navy600  = Color(0xFF1A3366)
 
-// ── MediaDrop Custom Palette ─────────────────────────────────────────────────
-val BrandPurple = Color(0xFF6200EE)
-val BrandPurpleLight = Color(0xFF9C4DFF)
-val BrandPurpleDark = Color(0xFF3700B3)
+// Gold accents
+val Gold400  = Color(0xFFFFD060)
+val Gold500  = Color(0xFFFFBD00)
+val Gold600  = Color(0xFFE6A800)
+val GoldGlow = Color(0x33FFD060)
 
-val BrandTeal = Color(0xFF03DAC5)
-val BrandTealDark = Color(0xFF018786)
+// Semantic
+val Teal400  = Color(0xFF00E5CC)
+val Teal500  = Color(0xFF00C4AE)
+val Purple400= Color(0xFFAA7FFF)
 
-// ── Dark Theme ────────────────────────────────────────────────────────────────
-val BackgroundDark = Color(0xFF0F0F0F)
-val SurfaceDark = Color(0xFF1C1C1E)
-val SurfaceVariantDark = Color(0xFF252528)
-val OnSurfaceDark = Color(0xFFE5E5EA)
-val OnSurfaceVariantDark = Color(0xFF8E8E93)
-val OutlineDark = Color(0xFF38383A)
+// Status colors
+val Green400 = Color(0xFF30D158)
+val Red400   = Color(0xFFFF453A)
+val Orange400= Color(0xFFFF9F0A)
+val Blue400  = Color(0xFF0A84FF)
 
-// ── Light Theme ───────────────────────────────────────────────────────────────
-val BackgroundLight = Color(0xFFFAFAFF)
-val SurfaceLight = Color(0xFFFFFFFF)
-val SurfaceVariantLight = Color(0xFFF2F2F7)
-val OnSurfaceLight = Color(0xFF1C1C1E)
-val OnSurfaceVariantLight = Color(0xFF636366)
-val OutlineLight = Color(0xFFD1D1D6)
+// Neutrals
+val White    = Color(0xFFFFFFFF)
+val Grey100  = Color(0xFFF2F2F7)
+val Grey200  = Color(0xFFD1D1D6)
+val Grey400  = Color(0xFF8E8E93)
+val Grey600  = Color(0xFF48484A)
+val Grey800  = Color(0xFF1C1C1E)
+val Grey900  = Color(0xFF111111)
+val Black    = Color(0xFF000000)
 
-// ── Status Colors ─────────────────────────────────────────────────────────────
-val StatusSuccess = Color(0xFF30D158)
-val StatusError = Color(0xFFFF453A)
-val StatusWarning = Color(0xFFFF9F0A)
-val StatusInfo = Color(0xFF0A84FF)
-
-// ── Platform Brand Colors ──────────────────────────────────────────────────────
-val YoutubeRed = Color(0xFFFF0000)
-val InstagramMagenta = Color(0xFFE1306C)
-val FacebookBlue = Color(0xFF1877F2)
-val TwitterBlue = Color(0xFF1DA1F2)
-val TiktokPink = Color(0xFFFF0050)
-val RedditOrange = Color(0xFFFF4500)
-val VimeoBlue = Color(0xFF1AB7EA)
-val TwitchPurple = Color(0xFF9146FF)
-val SoundcloudOrange = Color(0xFFFF5500)
-val LinkedinBlue = Color(0xFF0077B5)
+// Glass surface
+val GlassSurface = Color(0x1AFFFFFF)   // white 10%
+val GlassBorder  = Color(0x26FFD060)   // gold 15%

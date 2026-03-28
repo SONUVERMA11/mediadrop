@@ -2,10 +2,7 @@ package com.mediadrop.app.data.repository
 
 import com.mediadrop.app.data.remote.api.MediaApiService
 import com.mediadrop.app.data.remote.dto.FormatDto
-import com.mediadrop.app.domain.model.AudioFormat
-import com.mediadrop.app.domain.model.MediaInfo
-import com.mediadrop.app.domain.model.SupportedPlatform
-import com.mediadrop.app.domain.model.VideoFormat
+import com.mediadrop.app.domain.model.*
 import com.mediadrop.app.domain.repository.MediaRepository
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,22 +27,47 @@ class MediaRepositoryImpl @Inject constructor(
             ?: emptyList()
 
         val audioFormats = dto.formats
-            ?.filter {
-                (it.vcodec == null || it.vcodec == "none") &&
-                        it.acodec != null && it.acodec != "none"
-            }
+            ?.filter { (it.vcodec == null || it.vcodec == "none") && it.acodec != null && it.acodec != "none" }
             ?.map { it.toAudioFormat() }
             ?.sortedByDescending { it.bitrate.removeSuffix("kbps").toDoubleOrNull() ?: 0.0 }
             ?: emptyList()
 
         MediaInfo(
-            title = dto.title,
+            title        = dto.title,
             thumbnailUrl = dto.thumbnail ?: "",
-            duration = dto.duration ?: 0L,
-            platform = platform,
-            sourceUrl = url,
+            duration     = dto.duration ?: 0L,
+            platform     = platform,
+            sourceUrl    = url,
             videoFormats = videoFormats,
             audioFormats = audioFormats
+        )
+    }
+
+    /** Resolves the direct CDN URL for a given format — used by the chunked DownloadWorker */
+    override suspend fun getDownloadUrl(mediaUrl: String, formatId: String): Result<String> = runCatching {
+        val dto = apiService.getDownloadUrl(mediaUrl, formatId)
+        check(dto.url.isNotBlank()) { "Empty download URL" }
+        dto.url
+    }
+
+    /** Fetches flat playlist info without downloading anything */
+    override suspend fun fetchPlaylistInfo(url: String): Result<PlaylistInfo> = runCatching {
+        val dto = apiService.getPlaylistInfo(url)
+        if (dto.error != null) error(dto.error)
+        PlaylistInfo(
+            title        = dto.title,
+            thumbnailUrl = dto.thumbnail ?: "",
+            sourceUrl    = url,
+            entries      = dto.entries?.map { e ->
+                PlaylistEntry(
+                    id           = e.id,
+                    title        = e.title,
+                    url          = e.url,
+                    duration     = e.duration ?: 0L,
+                    thumbnailUrl = e.thumbnail ?: "",
+                    uploader     = e.uploader ?: ""
+                )
+            } ?: emptyList()
         )
     }
 
@@ -60,13 +82,13 @@ class MediaRepositoryImpl @Inject constructor(
 
         okHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "HTTP ${response.code}" }
-            val body = checkNotNull(response.body) { "Empty response body" }
+            val body  = checkNotNull(response.body) { "Empty response body" }
             val total = body.contentLength()
             var downloaded = 0L
 
             File(outputPath).also { it.parentFile?.mkdirs() }.outputStream().use { out ->
                 body.byteStream().use { input ->
-                    val buf = ByteArray(8 * 1024)
+                    val buf = ByteArray(65_536)
                     var read = input.read(buf)
                     while (read >= 0) {
                         out.write(buf, 0, read)
@@ -84,20 +106,20 @@ class MediaRepositoryImpl @Inject constructor(
 // ── Extension mappers ────────────────────────────────────────────────────────
 
 private fun FormatDto.toVideoFormat() = VideoFormat(
-    formatId = formatId,
+    formatId   = formatId,
     resolution = height?.let { "${it}p" } ?: resolution ?: "unknown",
-    extension = ext,
-    fileSize = filesize ?: filesizeApprox,
-    fps = fps?.toInt(),
-    codec = vcodec,
-    directUrl = url
+    extension  = ext,
+    fileSize   = filesize ?: filesizeApprox,
+    fps        = fps?.toInt(),
+    codec      = vcodec,
+    directUrl  = url
 )
 
 private fun FormatDto.toAudioFormat() = AudioFormat(
-    formatId = formatId,
-    bitrate = abr?.let { "${it.toInt()}kbps" } ?: formatNote ?: "unknown",
+    formatId  = formatId,
+    bitrate   = abr?.let { "${it.toInt()}kbps" } ?: formatNote ?: "unknown",
     extension = ext,
-    fileSize = filesize ?: filesizeApprox,
-    codec = acodec,
+    fileSize  = filesize ?: filesizeApprox,
+    codec     = acodec,
     directUrl = url
 )

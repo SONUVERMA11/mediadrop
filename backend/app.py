@@ -1,137 +1,169 @@
 #!/usr/bin/env python3
 """
-MediaDrop yt-dlp API Backend
-Deploy to Railway, Render, or any VPS supporting Python.
+DC App – yt-dlp Flask Backend
+Deploy to Railway (free tier) – zero cost.
 """
-import os
-import json
-import subprocess
-import tempfile
-from flask import Flask, request, jsonify, send_file, abort
+import os, json, subprocess
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-YT_DLP_BIN = os.environ.get("YT_DLP_BIN", "yt-dlp")
-MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))  # 2 hours default
+YT_DLP_BIN    = os.environ.get("YT_DLP_BIN", "yt-dlp")
+MAX_DURATION  = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
 
+def ytdlp(*args, timeout=60):
+    cmd = [YT_DLP_BIN, "--no-warnings", "--geo-bypass"] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
-def run_ytdlp(args: list) -> subprocess.CompletedProcess:
-    cmd = [YT_DLP_BIN] + args
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-
+def map_error(stderr):
+    s = stderr.lower()
+    if "not available in your country" in s: return "GEO_RESTRICTED", 403
+    if "private video" in s or "this video is private" in s: return "PRIVATE_CONTENT", 403
+    if "unsupported url" in s: return "UNSUPPORTED_URL", 400
+    if "rate" in s and "limit" in s: return "RATE_LIMITED", 429
+    return stderr.strip() or "PARSE_FAILED", 500
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
-
+    return jsonify({"status": "ok", "app": "DC"})
 
 @app.route("/info")
 def get_info():
-    """
-    GET /info?url=<media_url>
-    Returns yt-dlp --dump-json output parsed into MediaInfoDto format.
-    """
     url = request.args.get("url")
     if not url:
-        return jsonify({"error": "Missing 'url' parameter"}), 400
+        return jsonify({"error": "Missing url"}), 400
 
-    result = run_ytdlp([
-        "--dump-json",
-        "--no-playlist",
-        "--no-warnings",
-        "--geo-bypass",
-        url
-    ])
-
-    if result.returncode != 0:
-        error_msg = result.stderr.strip()
-        # Map known yt-dlp errors to friendly codes
-        if "is not available in your country" in error_msg:
-            return jsonify({"title": "", "formats": [], "error": "GEO_RESTRICTED"}), 403
-        if "Private video" in error_msg or "This video is private" in error_msg:
-            return jsonify({"title": "", "formats": [], "error": "PRIVATE_CONTENT"}), 403
-        if "Unsupported URL" in error_msg:
-            return jsonify({"title": "", "formats": [], "error": "UNSUPPORTED_URL"}), 400
-        return jsonify({"title": "", "formats": [], "error": error_msg or "PARSE_FAILED"}), 500
+    r = ytdlp("--dump-json", "--no-playlist", url)
+    if r.returncode != 0:
+        msg, code = map_error(r.stderr)
+        return jsonify({"title": "", "formats": [], "error": msg}), code
 
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(r.stdout)
     except json.JSONDecodeError:
-        return jsonify({"title": "", "formats": [], "error": "PARSE_FAILED"}), 500
+        return jsonify({"error": "PARSE_FAILED"}), 500
 
-    # Check duration limit
     duration = data.get("duration", 0) or 0
     if duration > MAX_DURATION:
         return jsonify({"error": f"Content too long (>{MAX_DURATION}s)"}), 413
 
-    # Build response in MediaInfoDto shape expected by Android app
-    formats = []
-    for fmt in data.get("formats", []):
-        formats.append({
-            "format_id": fmt.get("format_id", ""),
-            "ext": fmt.get("ext", ""),
-            "resolution": fmt.get("resolution"),
-            "width": fmt.get("width"),
-            "height": fmt.get("height"),
-            "fps": fmt.get("fps"),
-            "vcodec": fmt.get("vcodec"),
-            "acodec": fmt.get("acodec"),
-            "abr": fmt.get("abr"),
-            "vbr": fmt.get("vbr"),
-            "filesize": fmt.get("filesize"),
-            "filesize_approx": fmt.get("filesize_approx"),
-            "url": fmt.get("url"),
-            "format_note": fmt.get("format_note"),
-        })
+    formats = [
+        {
+            "format_id":    f.get("format_id", ""),
+            "ext":          f.get("ext", ""),
+            "resolution":   f.get("resolution"),
+            "width":        f.get("width"),
+            "height":       f.get("height"),
+            "fps":          f.get("fps"),
+            "vcodec":       f.get("vcodec"),
+            "acodec":       f.get("acodec"),
+            "abr":          f.get("abr"),
+            "vbr":          f.get("vbr"),
+            "filesize":     f.get("filesize"),
+            "filesize_approx": f.get("filesize_approx"),
+            "url":          f.get("url"),
+            "format_note":  f.get("format_note"),
+        }
+        for f in data.get("formats", [])
+    ]
 
     return jsonify({
-        "title": data.get("title", ""),
+        "title":     data.get("title", ""),
         "thumbnail": data.get("thumbnail"),
-        "duration": duration,
+        "duration":  duration,
         "extractor": data.get("extractor"),
-        "formats": formats,
-        "error": None
+        "formats":   formats,
+        "error":     None
     })
-
 
 @app.route("/download-url")
 def get_download_url():
-    """
-    GET /download-url?url=<media_url>&format_id=<id>
-    Returns the direct CDN URL for the specified format so the Android app
-    can download it directly using OkHttp/DownloadManager.
-    """
-    url = request.args.get("url")
+    url       = request.args.get("url")
     format_id = request.args.get("format_id")
     if not url or not format_id:
         return jsonify({"error": "Missing parameters"}), 400
 
-    result = run_ytdlp([
-        "--format", format_id,
-        "--get-url",
-        "--no-playlist",
-        "--no-warnings",
-        url
-    ])
+    r = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
+    if r.returncode != 0:
+        return jsonify({"error": r.stderr.strip() or "Failed to get URL"}), 500
 
-    if result.returncode != 0:
-        return jsonify({"error": result.stderr.strip() or "Failed to get URL"}), 500
+    direct_url = r.stdout.strip().splitlines()[0]
 
-    direct_url = result.stdout.strip().splitlines()[0]
-
-    # Attempt to get filename
-    name_result = run_ytdlp([
-        "--format", format_id,
-        "--get-filename",
-        "--no-playlist",
-        url
-    ])
-    filename = name_result.stdout.strip().splitlines()[0] if name_result.returncode == 0 else None
+    # filename
+    nr = ytdlp("--format", format_id, "--get-filename", "--no-playlist", url)
+    filename = nr.stdout.strip().splitlines()[0] if nr.returncode == 0 else None
 
     return jsonify({"url": direct_url, "filename": filename, "filesize": None})
 
+@app.route("/playlist-info")
+def get_playlist_info():
+    """
+    Returns flat playlist entries (no download).
+    Uses --flat-playlist so it returns quickly even for large playlists.
+    """
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"error": "Missing url"}), 400
+
+    # Dump playlist without downloading
+    r = ytdlp(
+        "--dump-json",
+        "--flat-playlist",
+        "--yes-playlist",
+        url,
+        timeout=90
+    )
+    if r.returncode != 0:
+        msg, code = map_error(r.stderr)
+        return jsonify({"title": "", "entries": [], "error": msg}), code
+
+    entries = []
+    playlist_title = ""
+    playlist_thumb = None
+
+    for line in r.stdout.strip().splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        # The flat playlist dump mixes playlist header + entries
+        if item.get("_type") == "playlist" or "entries" in item:
+            playlist_title = item.get("title", "")
+            playlist_thumb = item.get("thumbnail")
+            # If fully expanded (small playlists), entries are inline
+            for e in item.get("entries", []):
+                if e and e.get("id"):
+                    entries.append(_entry(e))
+        else:
+            # Each line is a video entry in flat mode
+            if item.get("id"):
+                entries.append(_entry(item))
+
+    if not entries:
+        return jsonify({"error": "No entries found — may not be a playlist"}), 404
+
+    if not playlist_title and entries:
+        playlist_title = f"Playlist ({len(entries)} videos)"
+
+    return jsonify({
+        "title":     playlist_title,
+        "thumbnail": playlist_thumb,
+        "entries":   entries,
+        "error":     None
+    })
+
+def _entry(e):
+    return {
+        "id":        e.get("id", ""),
+        "title":     e.get("title", "") or e.get("ie_key", ""),
+        "url":       e.get("url", "") or e.get("webpage_url", ""),
+        "duration":  e.get("duration"),
+        "thumbnail": e.get("thumbnail") or e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
+        "uploader":  e.get("uploader") or e.get("channel", ""),
+    }
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

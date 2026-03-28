@@ -1,53 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">MediaDrop</string>
-    <string name="app_tagline">Universal Video &amp; Media Downloader</string>
+    <string name="app_name">DC</string>
+    <string name="app_tagline">Download anything. Fast.</string>
+    <string name="app_credit">Made with ❤️ by SONU VERMA</string>
 
     <!-- Home screen -->
-    <string name="home_paste_hint">Paste a YouTube, TikTok, Instagram… URL</string>
-    <string name="home_fetch_button">Fetch Media</string>
-    <string name="home_fetching">Fetching media info…</string>
-    <string name="home_recent_downloads">Recent Downloads</string>
+    <string name="home_paste_hint">Paste any video or playlist URL…</string>
+    <string name="home_fetch_button">Fetch</string>
+    <string name="home_fetching">Fetching…</string>
+    <string name="home_recent_downloads">Recent</string>
 
     <!-- Format picker -->
     <string name="format_video">Video</string>
-    <string name="format_audio">Audio Only</string>
-    <string name="format_resolution">Resolution</string>
-    <string name="format_audio_quality">Audio Quality</string>
+    <string name="format_audio">Audio</string>
+    <string name="format_playlist">Playlist / Batch</string>
     <string name="format_download">Download</string>
+    <string name="format_download_all">Download All</string>
+    <string name="format_download_selected">Download Selected</string>
 
     <!-- Downloads screen -->
     <string name="downloads_empty_title">No downloads yet</string>
-    <string name="downloads_empty_subtitle">Paste a URL on the Home tab to get started</string>
-    <string name="downloads_filter_all">All</string>
-    <string name="downloads_filter_video">Video</string>
-    <string name="downloads_filter_audio">Audio</string>
-    <string name="downloads_filter_failed">Failed</string>
-
-    <!-- Settings -->
-    <string name="settings_title">Settings</string>
-    <string name="settings_default_quality">Default Video Quality</string>
-    <string name="settings_default_audio">Default Audio Format</string>
-    <string name="settings_max_concurrent">Max Concurrent Downloads</string>
-    <string name="settings_auto_clear">Auto-clear History</string>
-    <string name="settings_theme">Theme</string>
-    <string name="settings_notifications">Download Notifications</string>
-
-    <!-- Errors -->
-    <string name="error_no_internet">No internet connection. Check your network.</string>
-    <string name="error_unsupported_url">This link is not supported yet.</string>
-    <string name="error_geo_restricted">This content is not available in your region.</string>
-    <string name="error_private_content">This content is private or login-protected.</string>
-    <string name="error_rate_limited">Too many requests. Please wait a moment.</string>
-    <string name="error_parse_failed">Could not extract media info. Try again.</string>
-    <string name="error_storage_full">Not enough storage space.</string>
-    <string name="error_format_unavailable">Selected format is no longer available.</string>
-
-    <!-- Notifications -->
-    <string name="notif_downloading">Downloading</string>
-    <string name="notif_complete_title">✅ Download Complete</string>
-    <string name="notif_channel_download">Active Downloads</string>
-    <string name="notif_channel_complete">Completed Downloads</string>
+    <string name="downloads_empty_subtitle">Paste a URL on the Home tab to start</string>
 
     <!-- Actions -->
     <string name="action_open">Open</string>
@@ -55,4 +28,29 @@
     <string name="action_delete">Delete</string>
     <string name="action_retry">Retry</string>
     <string name="action_dismiss">Dismiss</string>
+    <string name="action_cancel">Cancel</string>
+
+    <!-- Errors -->
+    <string name="error_no_internet">No internet connection.</string>
+    <string name="error_unsupported_url">This link is not supported yet.</string>
+    <string name="error_parse_failed">Could not fetch media info. Try again.</string>
+    <string name="error_storage_full">Not enough storage space.</string>
+    <string name="error_private">This content is private or requires login.</string>
+    <string name="error_geo">Not available in your region.</string>
+
+    <!-- Notifications -->
+    <string name="notif_downloading">Downloading</string>
+    <string name="notif_complete">✅ Download Complete</string>
+    <string name="notif_channel_download">Active Downloads</string>
+    <string name="notif_channel_complete">Completed Downloads</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_quality">Default Video Quality</string>
+    <string name="settings_audio_format">Default Audio Format</string>
+    <string name="settings_max_concurrent">Max Concurrent Downloads</string>
+    <string name="settings_auto_clear">Auto-clear History</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_notifications">Notifications</string>
+    <string name="settings_chunks">Download Chunks (Speed)</string>
 </resources>
