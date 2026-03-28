@@ -49,18 +49,38 @@ sealed class MediaError(message: String) : Exception(message) {
 fun Throwable.toMediaError(): MediaError {
     val msg = message?.lowercase() ?: ""
     return when {
-        msg.contains("geo") || msg.contains("region") || msg.contains("country") ->
-            MediaError.GeoRestricted
-        msg.contains("private") || msg.contains("login") || msg.contains("auth") ->
-            MediaError.PrivateContent
-        msg.contains("rate") || msg.contains("429") ->
-            MediaError.RateLimited
-        msg.contains("unsupported") || msg.contains("no video formats") ->
-            MediaError.UnsupportedUrl
-        msg.contains("space") || msg.contains("storage") ->
-            MediaError.StorageFull
-        msg.contains("format") ->
-            MediaError.FormatUnavailable
+        // Network connectivity
+        msg.contains("network") || msg.contains("unable to resolve") ||
+        msg.contains("failed to connect") || msg.contains("timeout") ||
+        msg.contains("sockettimeout") || msg.contains("no address")      -> MediaError.NoInternet
+
+        // Geo restricted
+        msg.contains("geo") || msg.contains("region") ||
+        msg.contains("country") || msg.contains("geo_restricted")        -> MediaError.GeoRestricted
+
+        // Private / login required
+        msg.contains("private") || msg.contains("login") ||
+        msg.contains("auth") || msg.contains("private_content")          -> MediaError.PrivateContent
+
+        // Rate limited
+        msg.contains("rate") || msg.contains("429") ||
+        msg.contains("rate_limited") || msg.contains("too many")         -> MediaError.RateLimited
+
+        // Unsupported URL
+        msg.contains("unsupported") || msg.contains("no video formats") ||
+        msg.contains("unsupported_url") || msg.contains("not support")   -> MediaError.UnsupportedUrl
+
+        // Storage
+        msg.contains("space") || msg.contains("storage")                 -> MediaError.StorageFull
+
+        // Format unavailable
+        msg.contains("format") && !msg.contains("video formats")         -> MediaError.FormatUnavailable
+
+        // Catch-all HTTP errors — show "try again" style message
+        msg.contains("http 4") || msg.contains("http 5") ||
+        msg.contains("parse") || msg.contains("parse_failed")            -> MediaError.ParseFailed
+
         else -> MediaError.Unknown(originalCause = this)
     }
 }
+
