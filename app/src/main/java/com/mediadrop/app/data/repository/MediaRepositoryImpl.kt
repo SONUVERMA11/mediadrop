@@ -1,18 +1,13 @@
 package com.mediadrop.app.data.repository
 
 import com.mediadrop.app.data.remote.api.MediaApiService
-import com.mediadrop.app.data.remote.dto.DownloadUrlDto
 import com.mediadrop.app.data.remote.dto.FormatDto
 import com.mediadrop.app.domain.model.*
 import com.mediadrop.app.domain.repository.MediaRepository
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.io.File
 import javax.inject.Inject
 
 class MediaRepositoryImpl @Inject constructor(
-    private val apiService  : MediaApiService,
-    private val okHttpClient: OkHttpClient
+    private val apiService: MediaApiService
 ) : MediaRepository {
 
     override suspend fun fetchMediaInfo(url: String): Result<MediaInfo> = runCatching {
@@ -44,16 +39,6 @@ class MediaRepositoryImpl @Inject constructor(
         )
     }
 
-    override suspend fun getDownloadUrlDto(
-        mediaUrl: String,
-        formatId: String,
-        hasAudio: Boolean
-    ): Result<DownloadUrlDto> = runCatching {
-        val dto = apiService.getDownloadUrl(mediaUrl, formatId, hasAudio)
-        check(dto.url.isNotBlank()) { "Empty download URL from backend" }
-        dto
-    }
-
     override suspend fun fetchPlaylistInfo(url: String): Result<PlaylistInfo> = runCatching {
         val dto = apiService.getPlaylistInfo(url)
         if (dto.error != null) error(dto.error)
@@ -72,37 +57,6 @@ class MediaRepositoryImpl @Inject constructor(
                 )
             } ?: emptyList()
         )
-    }
-
-    override suspend fun downloadMedia(
-        url       : String,
-        formatId  : String,
-        outputPath: String,
-        onProgress: (Int) -> Unit
-    ): Result<String> = runCatching {
-        val dto     = apiService.getDownloadUrl(url, formatId, true)
-        val request = Request.Builder().url(dto.url).build()
-
-        okHttpClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "HTTP ${response.code}" }
-            val body  = checkNotNull(response.body) { "Empty response body" }
-            val total = body.contentLength()
-            var done  = 0L
-
-            File(outputPath).also { it.parentFile?.mkdirs() }.outputStream().use { out ->
-                body.byteStream().use { input ->
-                    val buf = ByteArray(262_144)  // 256 KB
-                    var n = input.read(buf)
-                    while (n >= 0) {
-                        out.write(buf, 0, n)
-                        done += n
-                        if (total > 0) onProgress(((done * 100) / total).toInt())
-                        n = input.read(buf)
-                    }
-                }
-            }
-        }
-        outputPath
     }
 }
 
