@@ -27,6 +27,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.MediaDrop"
+        android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
 
         <!-- Main Activity -->

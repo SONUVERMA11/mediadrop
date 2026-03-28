@@ -1,7 +1,6 @@
 package com.mediadrop.app.ui.downloads
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -25,6 +24,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mediadrop.app.ui.components.DownloadCard
 import com.mediadrop.app.ui.theme.*
+import com.mediadrop.app.util.FileUtils
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,14 +127,14 @@ fun DownloadsScreen(
                                         file
                                     )
                                     val mime = context.contentResolver.getType(uri)
-                                        ?: guessMime(dl.format)
+                                        ?: FileUtils.guessMime(dl.format)
                                     val intent = Intent(Intent.ACTION_VIEW).apply {
                                         setDataAndType(uri, mime)
                                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     }
                                     context.startActivity(Intent.createChooser(intent, "Open with"))
-                                } catch (e: Exception) { /* file picker fallback */ }
+                                } catch (e: Exception) { /* ignore */ }
                             }
                         },
                         onShare  = { dl ->
@@ -164,17 +164,3 @@ fun DownloadsScreen(
     }
 }
 
-private fun guessMime(format: String): String = when (format.lowercase()) {
-    "mp4", "m4v"        -> "video/mp4"
-    "mkv"               -> "video/x-matroska"
-    "webm"              -> "video/webm"
-    "avi"               -> "video/avi"
-    "mov"               -> "video/quicktime"
-    "mp3"               -> "audio/mpeg"
-    "m4a"               -> "audio/mp4"
-    "aac"               -> "audio/aac"
-    "opus"              -> "audio/opus"
-    "flac"              -> "audio/flac"
-    "wav"               -> "audio/wav"
-    else                -> "*/*"
-}

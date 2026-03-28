@@ -94,6 +94,8 @@ class DownloadWorker @AssistedInject constructor(
             if (success) {
                 val fileSize = FileUtils.getFileSize(outputPath)
                 downloadRepository.updateCompletion(downloadId, outputPath, fileSize)
+                // Make file visible in Files app, Gallery, and music players immediately
+                FileUtils.scanFile(context, outputPath, FileUtils.guessMime(format))
                 notificationHelper.showCompletionNotification(downloadId, title, fileSize, outputPath, format)
                 Result.success()
             } else {
