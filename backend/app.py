@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 DC App – yt-dlp Flask Backend
-Deploy to Railway (free tier) – zero cost.
 """
 import os, json, subprocess
 from flask import Flask, request, jsonify
@@ -10,10 +9,10 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-YT_DLP_BIN    = os.environ.get("YT_DLP_BIN", "yt-dlp")
-MAX_DURATION  = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
+YT_DLP_BIN   = os.environ.get("YT_DLP_BIN", "yt-dlp")
+MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
 
-def ytdlp(*args, timeout=60):
+def ytdlp(*args, timeout=90):
     cmd = [YT_DLP_BIN, "--no-warnings", "--geo-bypass"] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
@@ -49,25 +48,31 @@ def get_info():
     if duration > MAX_DURATION:
         return jsonify({"error": f"Content too long (>{MAX_DURATION}s)"}), 413
 
-    formats = [
-        {
-            "format_id":    f.get("format_id", ""),
-            "ext":          f.get("ext", ""),
-            "resolution":   f.get("resolution"),
-            "width":        f.get("width"),
-            "height":       f.get("height"),
-            "fps":          f.get("fps"),
-            "vcodec":       f.get("vcodec"),
-            "acodec":       f.get("acodec"),
-            "abr":          f.get("abr"),
-            "vbr":          f.get("vbr"),
-            "filesize":     f.get("filesize"),
+    formats = []
+    for f in data.get("formats", []):
+        vcodec = f.get("vcodec") or "none"
+        acodec = f.get("acodec") or "none"
+        has_video = vcodec != "none"
+        has_audio = acodec != "none"
+
+        formats.append({
+            "format_id":       f.get("format_id", ""),
+            "ext":             f.get("ext", ""),
+            "resolution":      f.get("resolution"),
+            "width":           f.get("width"),
+            "height":          f.get("height"),
+            "fps":             f.get("fps"),
+            "vcodec":          vcodec,
+            "acodec":          acodec,
+            "has_video":       has_video,
+            "has_audio":       has_audio,   # ← KEY: tells app if audio is bundled
+            "abr":             f.get("abr"),
+            "vbr":             f.get("vbr"),
+            "filesize":        f.get("filesize"),
             "filesize_approx": f.get("filesize_approx"),
-            "url":          f.get("url"),
-            "format_note":  f.get("format_note"),
-        }
-        for f in data.get("formats", [])
-    ]
+            "url":             f.get("url"),
+            "format_note":     f.get("format_note"),
+        })
 
     return jsonify({
         "title":     data.get("title", ""),
@@ -80,41 +85,59 @@ def get_info():
 
 @app.route("/download-url")
 def get_download_url():
+    """
+    Returns the direct CDN URL(s) for a format.
+    If the format is video-only (has_audio=false), also returns
+    audio_url so the app can download+merge for maximum quality.
+    """
     url       = request.args.get("url")
     format_id = request.args.get("format_id")
+    has_audio = request.args.get("has_audio", "true").lower() == "true"
+
     if not url or not format_id:
         return jsonify({"error": "Missing parameters"}), 400
 
-    r = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
-    if r.returncode != 0:
-        return jsonify({"error": r.stderr.strip() or "Failed to get URL"}), 500
+    if has_audio:
+        # Format already contains audio — get single CDN URL
+        r = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
+        if r.returncode != 0:
+            return jsonify({"error": r.stderr.strip() or "Failed to get URL"}), 500
 
-    direct_url = r.stdout.strip().splitlines()[0]
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+        video_url = lines[0] if lines else None
+        audio_url = lines[1] if len(lines) > 1 else None   # some formats return 2 lines
 
-    # filename
-    nr = ytdlp("--format", format_id, "--get-filename", "--no-playlist", url)
-    filename = nr.stdout.strip().splitlines()[0] if nr.returncode == 0 else None
+        return jsonify({
+            "url":       video_url,
+            "audio_url": audio_url,
+            "filesize":  None
+        })
+    else:
+        # Video-only format — fetch video URL and best audio URL separately
+        # so the app can download both in parallel and merge locally
+        r_video = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
+        r_audio = ytdlp("--format", "bestaudio[ext=m4a]/bestaudio", "--get-url", "--no-playlist", url)
 
-    return jsonify({"url": direct_url, "filename": filename, "filesize": None})
+        video_url = r_video.stdout.strip().splitlines()[0] if r_video.returncode == 0 else None
+        audio_url = r_audio.stdout.strip().splitlines()[0] if r_audio.returncode == 0 else None
+
+        if not video_url:
+            return jsonify({"error": "Could not resolve video URL"}), 500
+
+        return jsonify({
+            "url":       video_url,
+            "audio_url": audio_url,   # non-null → app merges video+audio
+            "filesize":  None
+        })
 
 @app.route("/playlist-info")
 def get_playlist_info():
-    """
-    Returns flat playlist entries (no download).
-    Uses --flat-playlist so it returns quickly even for large playlists.
-    """
+    """Returns flat playlist entries for batch download."""
     url = request.args.get("url")
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    # Dump playlist without downloading
-    r = ytdlp(
-        "--dump-json",
-        "--flat-playlist",
-        "--yes-playlist",
-        url,
-        timeout=90
-    )
+    r = ytdlp("--dump-json", "--flat-playlist", "--yes-playlist", url, timeout=90)
     if r.returncode != 0:
         msg, code = map_error(r.stderr)
         return jsonify({"title": "", "entries": [], "error": msg}), code
@@ -129,16 +152,13 @@ def get_playlist_info():
         except json.JSONDecodeError:
             continue
 
-        # The flat playlist dump mixes playlist header + entries
         if item.get("_type") == "playlist" or "entries" in item:
             playlist_title = item.get("title", "")
             playlist_thumb = item.get("thumbnail")
-            # If fully expanded (small playlists), entries are inline
             for e in item.get("entries", []):
                 if e and e.get("id"):
                     entries.append(_entry(e))
         else:
-            # Each line is a video entry in flat mode
             if item.get("id"):
                 entries.append(_entry(item))
 
@@ -161,7 +181,7 @@ def _entry(e):
         "title":     e.get("title", "") or e.get("ie_key", ""),
         "url":       e.get("url", "") or e.get("webpage_url", ""),
         "duration":  e.get("duration"),
-        "thumbnail": e.get("thumbnail") or e.get("thumbnails", [{}])[-1].get("url") if e.get("thumbnails") else None,
+        "thumbnail": e.get("thumbnail") or (e.get("thumbnails") or [{}])[-1].get("url"),
         "uploader":  e.get("uploader") or e.get("channel", ""),
     }
 

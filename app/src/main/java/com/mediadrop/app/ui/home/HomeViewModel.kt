@@ -84,9 +84,9 @@ class HomeViewModel @Inject constructor(
             .onFailure { _uiState.value = HomeUiState.Error(it.toMediaError().userMessage()) }
     }
 
-    fun startDownload(mediaInfo: MediaInfo, formatId: String, format: String, quality: String) {
+    fun startDownload(mediaInfo: MediaInfo, formatId: String, format: String, quality: String, hasAudio: Boolean = true) {
         viewModelScope.launch {
-            runCatching { startDownloadUseCase(mediaInfo, formatId, format, quality) }
+            runCatching { startDownloadUseCase(mediaInfo, formatId, format, quality, hasAudio) }
             dismissSheet()
         }
     }

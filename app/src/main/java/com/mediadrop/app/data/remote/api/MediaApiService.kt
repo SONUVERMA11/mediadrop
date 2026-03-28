@@ -15,8 +15,9 @@ interface MediaApiService {
 
     @GET("download-url")
     suspend fun getDownloadUrl(
-        @Query("url")       url: String,
-        @Query("format_id") formatId: String
+        @Query("url")       url     : String,
+        @Query("format_id") formatId: String,
+        @Query("has_audio") hasAudio: Boolean = true
     ): DownloadUrlDto
 
     @GET("playlist-info")

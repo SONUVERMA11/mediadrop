@@ -46,7 +46,8 @@ object Routes {
 @Composable
 fun MediaDropApp(
     dataStore : DataStore<Preferences>,
-    sharedUrl : String? = null
+    sharedUrl : String? = null,
+    autoFetch  : Boolean = false
 ) {
     val systemDark  = isSystemInDarkTheme()
 
@@ -84,7 +85,7 @@ fun MediaDropApp(
 
             // ONE permanent main destination — tab nav lives entirely inside here
             composable(Routes.MAIN) {
-                MainScreen(sharedUrl = sharedUrl)
+                MainScreen(sharedUrl = sharedUrl, autoFetch = autoFetch)
             }
         }
     }
@@ -94,7 +95,7 @@ fun MediaDropApp(
 // MainScreen — owns the inner tab NavController, never re-created between tabs
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
-fun MainScreen(sharedUrl: String?) {
+fun MainScreen(sharedUrl: String?, autoFetch: Boolean = false) {
     val tabNav = rememberNavController()
 
     val tabs = listOf(
@@ -162,7 +163,13 @@ fun MainScreen(sharedUrl: String?) {
             composable(Routes.HOME) {
                 val vm: HomeViewModel = hiltViewModel()
                 LaunchedEffect(sharedUrl) {
-                    if (!sharedUrl.isNullOrBlank()) vm.setUrlFromShare(sharedUrl)
+                    if (!sharedUrl.isNullOrBlank()) {
+                        vm.setUrlFromShare(sharedUrl)
+                    }
+                }
+                LaunchedEffect(autoFetch) {
+                    // Triggered from ShareReceiverActivity — auto-fetch after URL is set
+                    if (autoFetch && !sharedUrl.isNullOrBlank()) vm.fetchMedia()
                 }
                 HomeScreen(
                     viewModel             = vm,

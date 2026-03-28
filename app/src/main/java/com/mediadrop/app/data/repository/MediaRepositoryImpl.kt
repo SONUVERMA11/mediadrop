@@ -1,6 +1,7 @@
 package com.mediadrop.app.data.repository
 
 import com.mediadrop.app.data.remote.api.MediaApiService
+import com.mediadrop.app.data.remote.dto.DownloadUrlDto
 import com.mediadrop.app.data.remote.dto.FormatDto
 import com.mediadrop.app.domain.model.*
 import com.mediadrop.app.domain.repository.MediaRepository
@@ -10,7 +11,7 @@ import java.io.File
 import javax.inject.Inject
 
 class MediaRepositoryImpl @Inject constructor(
-    private val apiService: MediaApiService,
+    private val apiService  : MediaApiService,
     private val okHttpClient: OkHttpClient
 ) : MediaRepository {
 
@@ -43,14 +44,16 @@ class MediaRepositoryImpl @Inject constructor(
         )
     }
 
-    /** Resolves the direct CDN URL for a given format — used by the chunked DownloadWorker */
-    override suspend fun getDownloadUrl(mediaUrl: String, formatId: String): Result<String> = runCatching {
-        val dto = apiService.getDownloadUrl(mediaUrl, formatId)
-        check(dto.url.isNotBlank()) { "Empty download URL" }
-        dto.url
+    override suspend fun getDownloadUrlDto(
+        mediaUrl: String,
+        formatId: String,
+        hasAudio: Boolean
+    ): Result<DownloadUrlDto> = runCatching {
+        val dto = apiService.getDownloadUrl(mediaUrl, formatId, hasAudio)
+        check(dto.url.isNotBlank()) { "Empty download URL from backend" }
+        dto
     }
 
-    /** Fetches flat playlist info without downloading anything */
     override suspend fun fetchPlaylistInfo(url: String): Result<PlaylistInfo> = runCatching {
         val dto = apiService.getPlaylistInfo(url)
         if (dto.error != null) error(dto.error)
@@ -72,29 +75,29 @@ class MediaRepositoryImpl @Inject constructor(
     }
 
     override suspend fun downloadMedia(
-        url: String,
-        formatId: String,
+        url       : String,
+        formatId  : String,
         outputPath: String,
         onProgress: (Int) -> Unit
     ): Result<String> = runCatching {
-        val downloadUrlDto = apiService.getDownloadUrl(url, formatId)
-        val request = Request.Builder().url(downloadUrlDto.url).build()
+        val dto     = apiService.getDownloadUrl(url, formatId, true)
+        val request = Request.Builder().url(dto.url).build()
 
         okHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "HTTP ${response.code}" }
             val body  = checkNotNull(response.body) { "Empty response body" }
             val total = body.contentLength()
-            var downloaded = 0L
+            var done  = 0L
 
             File(outputPath).also { it.parentFile?.mkdirs() }.outputStream().use { out ->
                 body.byteStream().use { input ->
-                    val buf = ByteArray(65_536)
-                    var read = input.read(buf)
-                    while (read >= 0) {
-                        out.write(buf, 0, read)
-                        downloaded += read
-                        if (total > 0) onProgress(((downloaded * 100) / total).toInt())
-                        read = input.read(buf)
+                    val buf = ByteArray(262_144)  // 256 KB
+                    var n = input.read(buf)
+                    while (n >= 0) {
+                        out.write(buf, 0, n)
+                        done += n
+                        if (total > 0) onProgress(((done * 100) / total).toInt())
+                        n = input.read(buf)
                     }
                 }
             }
@@ -103,7 +106,7 @@ class MediaRepositoryImpl @Inject constructor(
     }
 }
 
-// ── Extension mappers ────────────────────────────────────────────────────────
+// ── Extension mappers ─────────────────────────────────────────────────────────
 
 private fun FormatDto.toVideoFormat() = VideoFormat(
     formatId   = formatId,
@@ -112,7 +115,8 @@ private fun FormatDto.toVideoFormat() = VideoFormat(
     fileSize   = filesize ?: filesizeApprox,
     fps        = fps?.toInt(),
     codec      = vcodec,
-    directUrl  = url
+    directUrl  = url,
+    hasAudio   = hasAudio ?: (acodec != null && acodec != "none")
 )
 
 private fun FormatDto.toAudioFormat() = AudioFormat(

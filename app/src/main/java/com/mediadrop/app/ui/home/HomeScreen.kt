@@ -74,8 +74,8 @@ fun HomeScreen(
         FormatPickerBottomSheet(
             mediaInfo = mediaInfo,
             onDismiss = { viewModel.dismissSheet() },
-            onDownload = { formatId, format, quality ->
-                viewModel.startDownload(mediaInfo, formatId, format, quality)
+            onDownload = { formatId, format, quality, hasAudio ->
+                viewModel.startDownload(mediaInfo, formatId, format, quality, hasAudio)
                 onNavigateToDownloads()
             }
         )

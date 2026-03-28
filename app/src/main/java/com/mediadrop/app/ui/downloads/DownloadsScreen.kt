@@ -122,9 +122,7 @@ fun DownloadsScreen(
                             if (file.exists()) {
                                 try {
                                     val uri = FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.fileprovider",
-                                        file
+                                        context, "${context.packageName}.fileprovider", file
                                     )
                                     val mime = context.contentResolver.getType(uri)
                                         ?: FileUtils.guessMime(dl.format)
@@ -142,9 +140,7 @@ fun DownloadsScreen(
                             if (file.exists()) {
                                 try {
                                     val uri = FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.fileprovider",
-                                        file
+                                        context, "${context.packageName}.fileprovider", file
                                     )
                                     val intent = Intent(Intent.ACTION_SEND).apply {
                                         type = context.contentResolver.getType(uri) ?: "*/*"
@@ -155,6 +151,8 @@ fun DownloadsScreen(
                                 } catch (e: Exception) { }
                             }
                         },
+                        onCancel = { dl -> viewModel.cancelDownload(dl.id) },
+                        onRetry  = { dl -> viewModel.retryDownload(dl) },
                         onDelete = { dl -> viewModel.deleteDownload(dl.id) }
                     )
                 }

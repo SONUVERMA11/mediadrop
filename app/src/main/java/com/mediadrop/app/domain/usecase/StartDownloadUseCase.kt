@@ -18,19 +18,20 @@ import java.util.UUID
 import javax.inject.Inject
 
 class StartDownloadUseCase @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val downloadRepository: DownloadRepository,
-    private val dataStore: DataStore<Preferences>
+    @ApplicationContext private val context         : Context,
+    private val downloadRepository                  : DownloadRepository,
+    private val dataStore                           : DataStore<Preferences>
 ) {
     suspend operator fun invoke(
-        mediaInfo: MediaInfo,
-        formatId : String,
-        format   : String,
-        quality  : String
+        mediaInfo : MediaInfo,
+        formatId  : String,
+        format    : String,
+        quality   : String,
+        hasAudio  : Boolean = true
     ): String {
         val downloadId = UUID.randomUUID().toString()
 
-        // Read save location preference
+        // Read save-location preference
         val prefs        = dataStore.data.first()
         val saveLocation = prefs[PrefKeys.SAVE_LOCATION]?.let {
             runCatching { SaveLocation.valueOf(it) }.getOrNull()
@@ -44,7 +45,7 @@ class StartDownloadUseCase @Inject constructor(
             saveLocation = saveLocation
         )
 
-        val entity = DownloadEntity(
+        downloadRepository.insertDownload(DownloadEntity(
             id           = downloadId,
             title        = mediaInfo.title,
             sourceUrl    = mediaInfo.sourceUrl,
@@ -55,35 +56,33 @@ class StartDownloadUseCase @Inject constructor(
             platform     = mediaInfo.platform.name,
             thumbnailUrl = mediaInfo.thumbnailUrl,
             status       = DownloadStatus.QUEUED.name
-        )
-        downloadRepository.insertDownload(entity)
+        ))
 
         val inputData = workDataOf(
-            DownloadWorker.KEY_DOWNLOAD_ID  to downloadId,
-            DownloadWorker.KEY_MEDIA_URL    to mediaInfo.sourceUrl,
-            DownloadWorker.KEY_FORMAT_ID    to formatId,
-            DownloadWorker.KEY_FORMAT       to format,
-            DownloadWorker.KEY_QUALITY      to quality,
-            DownloadWorker.KEY_OUTPUT_PATH  to outputPath,
-            DownloadWorker.KEY_TITLE        to mediaInfo.title,
-            DownloadWorker.KEY_THUMBNAIL    to mediaInfo.thumbnailUrl
+            DownloadWorker.KEY_DOWNLOAD_ID to downloadId,
+            DownloadWorker.KEY_MEDIA_URL   to mediaInfo.sourceUrl,
+            DownloadWorker.KEY_FORMAT_ID   to formatId,
+            DownloadWorker.KEY_FORMAT      to format,
+            DownloadWorker.KEY_QUALITY     to quality,
+            DownloadWorker.KEY_OUTPUT_PATH to outputPath,
+            DownloadWorker.KEY_TITLE       to mediaInfo.title,
+            DownloadWorker.KEY_THUMBNAIL   to mediaInfo.thumbnailUrl,
+            DownloadWorker.KEY_HAS_AUDIO   to hasAudio
         )
-
-        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
-            .setId(UUID.fromString(downloadId))
-            .setInputData(inputData)
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
-                    .build()
-            )
-            .addTag(DownloadWorker.TAG_DOWNLOAD)
-            .build()
 
         WorkManager.getInstance(context).enqueueUniqueWork(
             downloadId,
             ExistingWorkPolicy.REPLACE,
-            request
+            OneTimeWorkRequestBuilder<DownloadWorker>()
+                .setId(UUID.fromString(downloadId))
+                .setInputData(inputData)
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build()
+                )
+                .addTag(DownloadWorker.TAG_DOWNLOAD)
+                .build()
         )
         return downloadId
     }

@@ -19,12 +19,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val sharedUrl = intent?.getStringExtra("SHARED_URL")
+        val sharedUrl  = intent?.getStringExtra("SHARED_URL")
+        val autoFetch  = intent?.getBooleanExtra("AUTO_FETCH", false) ?: false
 
         setContent {
             MediaDropApp(
-                dataStore = dataStore,
-                sharedUrl = sharedUrl
+                dataStore  = dataStore,
+                sharedUrl  = sharedUrl,
+                autoFetch  = autoFetch
             )
         }
     }
