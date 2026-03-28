@@ -2,33 +2,19 @@
 """
 DC App – yt-dlp Flask Backend
 """
-import os, json, subprocess, logging
+import os, json, subprocess
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("dc-backend")
-
 YT_DLP_BIN   = os.environ.get("YT_DLP_BIN", "yt-dlp")
 MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
 
-# Standard browser headers — CDNs (YouTube, etc.) require these to serve content
-BROWSER_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
-DEFAULT_HEADERS = {
-    "User-Agent": BROWSER_UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-us,en;q=0.5",
-}
-
-def ytdlp(*args, timeout=90):
+def ytdlp(*args, timeout=180):
     cmd = [YT_DLP_BIN, "--no-warnings", "--geo-bypass",
-           "--user-agent", BROWSER_UA] + list(args)
+           "--no-check-certificates"] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 def map_error(stderr):
@@ -37,7 +23,6 @@ def map_error(stderr):
     if "private video" in s or "this video is private" in s: return "PRIVATE_CONTENT", 403
     if "unsupported url" in s: return "UNSUPPORTED_URL", 400
     if "rate" in s and "limit" in s: return "RATE_LIMITED", 429
-    if "sign in" in s or "login" in s: return "LOGIN_REQUIRED", 403
     return stderr.strip() or "PARSE_FAILED", 500
 
 @app.route("/health")
@@ -50,10 +35,8 @@ def get_info():
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    log.info(f"Fetching info for: {url}")
     r = ytdlp("--dump-json", "--no-playlist", url)
     if r.returncode != 0:
-        log.warning(f"yt-dlp /info failed: {r.stderr[:200]}")
         msg, code = map_error(r.stderr)
         return jsonify({"title": "", "formats": [], "error": msg}), code
 
@@ -83,7 +66,7 @@ def get_info():
             "vcodec":          vcodec,
             "acodec":          acodec,
             "has_video":       has_video,
-            "has_audio":       has_audio,
+            "has_audio":       has_audio,   # ← KEY: tells app if audio is bundled
             "abr":             f.get("abr"),
             "vbr":             f.get("vbr"),
             "filesize":        f.get("filesize"),
@@ -101,44 +84,10 @@ def get_info():
         "error":     None
     })
 
-
-def _resolve_format(format_spec, url):
-    """
-    Resolve a format to its CDN URL and http_headers.
-    Uses --dump-json --format for reliability (returns both url + headers).
-    Falls back to --get-url on failure.
-    Returns (cdn_url: str|None, headers: dict, filesize: int|None)
-    """
-    # Primary: --dump-json gives us both the CDN URL and required headers
-    r = ytdlp("--format", format_spec, "--dump-json", "--no-playlist", url,
-              timeout=60)
-    if r.returncode == 0:
-        try:
-            data = json.loads(r.stdout)
-            cdn_url  = data.get("url")
-            headers  = data.get("http_headers") or DEFAULT_HEADERS
-            filesize = data.get("filesize") or data.get("filesize_approx")
-            if cdn_url:
-                return cdn_url, headers, filesize
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Fallback: --get-url is faster but doesn't return headers
-    log.info(f"Falling back to --get-url for format {format_spec}")
-    r2 = ytdlp("--format", format_spec, "--get-url", "--no-playlist", url)
-    if r2.returncode == 0:
-        lines = [l.strip() for l in r2.stdout.strip().splitlines() if l.strip()]
-        if lines:
-            return lines[0], DEFAULT_HEADERS, None
-
-    return None, DEFAULT_HEADERS, None
-
-
 @app.route("/download-url")
 def get_download_url():
     """
-    Returns the direct CDN URL(s) for a format, along with the HTTP headers
-    required to download from that CDN (User-Agent, etc.).
+    Returns the direct CDN URL(s) for a format.
     If the format is video-only (has_audio=false), also returns
     audio_url so the app can download+merge for maximum quality.
     """
@@ -149,36 +98,52 @@ def get_download_url():
     if not url or not format_id:
         return jsonify({"error": "Missing parameters"}), 400
 
-    log.info(f"Resolving download URL: format={format_id} has_audio={has_audio} url={url}")
-
     if has_audio:
-        # Format already contains audio — single CDN URL
-        cdn_url, headers, filesize = _resolve_format(format_id, url)
-        if not cdn_url:
-            return jsonify({"error": "Failed to resolve download URL"}), 500
+        # Format already contains audio — get single CDN URL
+        r = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
+        if r.returncode != 0:
+            return jsonify({"error": r.stderr.strip() or "Failed to get URL"}), 500
 
-        return jsonify({
-            "url":       cdn_url,
-            "audio_url": None,
-            "headers":   headers,
-            "filesize":  filesize
-        })
-    else:
-        # Video-only format — resolve video + best audio separately
-        video_url, headers, v_filesize = _resolve_format(format_id, url)
-        audio_url, _, _                = _resolve_format(
-            "bestaudio[ext=m4a]/bestaudio", url)
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+        video_url = lines[0] if lines else None
+        audio_url = lines[1] if len(lines) > 1 else None   # some formats return 2 lines
 
         if not video_url:
-            return jsonify({"error": "Could not resolve video URL"}), 500
+            return jsonify({"error": "yt-dlp returned empty URL for this format"}), 500
 
         return jsonify({
             "url":       video_url,
             "audio_url": audio_url,
-            "headers":   headers,
-            "filesize":  v_filesize
+            "filesize":  None
         })
+    else:
+        # Video-only format — fetch video URL and best audio URL separately
+        # so the app can download both in parallel and merge locally
+        r_video = ytdlp("--format", format_id, "--get-url", "--no-playlist", url)
+        # Prefer m4a (AAC) over opus so MediaMuxer can mux it into MP4 without issues
+        r_audio = ytdlp("--format", "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio",
+                        "--get-url", "--no-playlist", url)
 
+        video_url = r_video.stdout.strip().splitlines()[0].strip() if r_video.returncode == 0 else None
+        audio_url = r_audio.stdout.strip().splitlines()[0].strip() if r_audio.returncode == 0 else None
+
+        if not video_url:
+            return jsonify({"error": "Could not resolve video URL"}), 500
+
+        if not audio_url:
+            # Return video-only if no audio URL found
+            # Client will still download the video, just without audio merge
+            return jsonify({
+                "url":       video_url,
+                "audio_url": None,
+                "filesize":  None
+            })
+
+        return jsonify({
+            "url":       video_url,
+            "audio_url": audio_url,   # non-null → app merges video+audio
+            "filesize":  None
+        })
 
 @app.route("/playlist-info")
 def get_playlist_info():
@@ -187,7 +152,6 @@ def get_playlist_info():
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    log.info(f"Fetching playlist: {url}")
     r = ytdlp("--dump-json", "--flat-playlist", "--yes-playlist", url, timeout=90)
     if r.returncode != 0:
         msg, code = map_error(r.stderr)

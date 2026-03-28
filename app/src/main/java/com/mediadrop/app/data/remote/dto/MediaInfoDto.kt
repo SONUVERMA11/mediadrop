@@ -32,8 +32,7 @@ data class FormatDto(
 
 data class DownloadUrlDto(
     val url      : String = "",
-    @SerializedName("audio_url") val audioUrl: String? = null,
-    val headers  : Map<String, String>? = null,   // CDN headers (User-Agent, etc.) from backend
+    @SerializedName("audio_url") val audioUrl: String? = null,   // ← NEW: set for video-only formats
     val filename : String? = null,
     val filesize : Long? = null,
     val error    : String? = null

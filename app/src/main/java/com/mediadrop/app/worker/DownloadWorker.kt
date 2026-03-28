@@ -2,7 +2,6 @@ package com.mediadrop.app.worker
 
 import android.content.Context
 import android.media.MediaCodec
-import android.util.Log
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
@@ -52,27 +51,26 @@ class DownloadWorker @AssistedInject constructor(
         const val TAG_DOWNLOAD    = "download_worker"
 
         // ── Reliable + fast tuning ────────────────────────────────────────
-        // 8 chunks: enough to saturate any mobile CDN without deadlocking threads
-        // 512 KB buffer: large enough for throughput, small enough for memory
-        private const val CHUNKS        = 8
-        private const val BUFFER_SIZE   = 524_288     // 512 KB
-        private const val CHUNK_RETRIES = 3
-        private const val TIMEOUT_CONN  = 20L
-        private const val TIMEOUT_READ  = 90L
+        // 4 chunks: balanced for mobile CDN reliability; more chunks = more 206 failures
+        // 256 KB buffer: balanced for throughput vs memory
+        private const val CHUNKS        = 4
+        private const val BUFFER_SIZE   = 262_144     // 256 KB
+        private const val CHUNK_RETRIES = 4
+        private const val TIMEOUT_CONN  = 30L
+        private const val TIMEOUT_READ  = 120L
         private const val NOTIF_THROTTLE_MS = 400L    // max notification update rate
-        private const val TAG = "DownloadWorker"
 
-        // Browser User-Agent — CDNs (YouTube, Instagram, etc.) reject requests without one
-        private const val BROWSER_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        // User-Agent that CDNs (YouTube, etc.) expect to see
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
         .dispatcher(Dispatcher().apply {
-            maxRequests        = 32
-            maxRequestsPerHost = 16
+            maxRequests        = 16
+            maxRequestsPerHost = 8
         })
         .connectTimeout(TIMEOUT_CONN, TimeUnit.SECONDS)
         .readTimeout(TIMEOUT_READ, TimeUnit.SECONDS)
@@ -81,23 +79,6 @@ class DownloadWorker @AssistedInject constructor(
         .retryOnConnectionFailure(true)
         .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
         .build()
-
-    /** Original page URL — used as Referer header for CDN requests */
-    @Volatile private var referer = ""
-
-    /**
-     * Build a CDN request with standard browser headers.
-     * Without these, YouTube / Instagram / TikTok CDNs return 403 Forbidden.
-     */
-    private fun cdnRequest(url: String): Request.Builder =
-        Request.Builder()
-            .url(url)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept", "*/*")
-            .header("Accept-Language", "en-US,en;q=0.5")
-            .header("Accept-Encoding", "identity")
-            .header("Referer", referer)
-            .header("Connection", "keep-alive")
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val title = inputData.getString(KEY_TITLE) ?: "Downloading…"
@@ -114,17 +95,16 @@ class DownloadWorker @AssistedInject constructor(
         val title      = inputData.getString(KEY_TITLE)        ?: "Media"
         val hasAudio   = inputData.getBoolean(KEY_HAS_AUDIO, true)
 
-        referer = mediaUrl   // set before any CDN requests so Referer header is correct
-        Log.d(TAG, "Starting download: id=$downloadId format=$formatId hasAudio=$hasAudio")
-
         setForeground(notificationHelper.createForegroundInfo(downloadId, title, 0))
         downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.DOWNLOADING)
 
         return@withContext try {
             // ── 1. Resolve CDN URL(s) from backend ────────────────────────
+            // Always fetch a fresh URL — CDN signed URLs expire and cannot be reused
             val urlDtoResult = mediaRepository.getDownloadUrlDto(mediaUrl, formatId, hasAudio)
             if (urlDtoResult.isFailure) {
-                Log.e(TAG, "Failed to resolve CDN URL for $mediaUrl: ${urlDtoResult.exceptionOrNull()}")
+                val errMsg = urlDtoResult.exceptionOrNull()?.message ?: "Unknown"
+                android.util.Log.e("DownloadWorker", "URL fetch failed: $errMsg")
                 downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
                 return@withContext if (runAttemptCount < 2) Result.retry() else Result.failure()
             }
@@ -132,12 +112,22 @@ class DownloadWorker @AssistedInject constructor(
             val videoUrl = urlDto.url
             val audioUrl = urlDto.audioUrl   // non-null → format is video-only
 
+            if (videoUrl.isBlank()) {
+                android.util.Log.e("DownloadWorker", "Empty CDN URL returned from backend")
+                downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
+                return@withContext Result.failure()
+            }
+
+            android.util.Log.d("DownloadWorker", "Starting download: hasAudio=$hasAudio audioUrl=${audioUrl?.take(60)}")
+
             // ── 2. Download ────────────────────────────────────────────────
             val success = if (!audioUrl.isNullOrBlank()) {
                 // Video-only format: download video + audio concurrently, then merge
                 downloadAndMerge(videoUrl, audioUrl, outputPath, downloadId, title)
             } else {
+                // Single stream: try chunked first, fall back to streaming
                 val len = probeContentLength(videoUrl)
+                android.util.Log.d("DownloadWorker", "Content-Length: $len")
                 when {
                     len > 0 -> chunkedDownload(videoUrl, outputPath, len, downloadId, title)
                     else    -> streamingDownload(videoUrl, outputPath, downloadId, title)
@@ -146,24 +136,33 @@ class DownloadWorker @AssistedInject constructor(
 
             if (success) {
                 val fileSize = FileUtils.getFileSize(outputPath)
+                if (fileSize == 0L) {
+                    // File is empty — download silently failed
+                    android.util.Log.e("DownloadWorker", "Downloaded file is 0 bytes: $outputPath")
+                    downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
+                    notificationHelper.cancelNotification(downloadId)
+                    return@withContext if (runAttemptCount < 2) Result.retry() else Result.failure()
+                }
                 downloadRepository.updateCompletion(downloadId, outputPath, fileSize)
                 FileUtils.scanFile(context, outputPath, FileUtils.guessMime(format))
                 notificationHelper.showCompletionNotification(downloadId, title, fileSize, outputPath, format)
                 setProgressAsync(workDataOf(KEY_PROGRESS to 100))
                 Result.success()
             } else {
-                Log.e(TAG, "Download failed for $title (attempt ${runAttemptCount + 1})")
+                android.util.Log.e("DownloadWorker", "Download returned false for: $videoUrl")
+                // Clean up partial files
+                runCatching { java.io.File(outputPath).delete() }
                 downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
                 notificationHelper.cancelNotification(downloadId)
                 if (runAttemptCount < 2) Result.retry() else Result.failure()
             }
         } catch (e: CancellationException) {
-            Log.w(TAG, "Download cancelled: $title")
-            downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
+            downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.CANCELLED)
             notificationHelper.cancelNotification(downloadId)
             Result.failure()
         } catch (e: Exception) {
-            Log.e(TAG, "Download exception for $title (attempt ${runAttemptCount + 1})", e)
+            android.util.Log.e("DownloadWorker", "Unexpected exception", e)
+            runCatching { java.io.File(outputPath).delete() }
             downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
             notificationHelper.cancelNotification(downloadId)
             if (runAttemptCount < 2) Result.retry() else Result.failure()
@@ -241,25 +240,51 @@ class DownloadWorker @AssistedInject constructor(
         var attempt = 0
         while (attempt < CHUNK_RETRIES) {
             try {
-                val req = cdnRequest(url)
+                val req = Request.Builder()
+                    .url(url)
                     .header("Range", "bytes=$start-$end")
+                    .header("Accept-Encoding", "identity")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "*/*")
+                    .header("Connection", "keep-alive")
                     .build()
 
                 httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful && resp.code != 206) {
-                        Log.w(TAG, "Chunk $start-$end failed: HTTP ${resp.code}")
+                    // Accept 200 (server ignores range) or 206 (partial content)
+                    if (resp.code != 200 && resp.code != 206) {
+                        android.util.Log.w("DownloadWorker",
+                            "Chunk $start-$end got HTTP ${resp.code}, retrying")
                         attempt++; return@use
                     }
-                    val body = resp.body ?: run { attempt++; return@use }
+                    val body = resp.body ?: run {
+                        android.util.Log.w("DownloadWorker", "Null body for chunk $start-$end")
+                        attempt++; return@use
+                    }
+
+                    // If server returned 200 instead of 206, it sent the full file;
+                    // we need to skip to the right offset in the stream
+                    val offset = if (resp.code == 200) start else 0L
 
                     RandomAccessFile(file, "rw").use { raf ->
-                        raf.seek(start)
+                        raf.seek(start)  // write position in output file
                         val buf = ByteArray(BUFFER_SIZE)
                         body.byteStream().use { stream ->
+                            var skipped = 0L
+                            // Skip to the right position in the stream if server sent full file
+                            while (skipped < offset) {
+                                val toSkip = minOf(offset - skipped, buf.size.toLong())
+                                val s = stream.skip(toSkip)
+                                if (s <= 0) break
+                                skipped += s
+                            }
                             var n = stream.read(buf)
-                            while (n > 0) {
-                                raf.write(buf, 0, n)
-                                totalBytes.addAndGet(n.toLong())
+                            var written = start
+                            while (n > 0 && written <= end) {
+                                // Don't write beyond end of this chunk
+                                val canWrite = minOf(n, (end - written + 1).toInt())
+                                raf.write(buf, 0, canWrite)
+                                totalBytes.addAndGet(canWrite.toLong())
+                                written += canWrite
                                 n = stream.read(buf)
                             }
                         }
@@ -267,13 +292,15 @@ class DownloadWorker @AssistedInject constructor(
                     return true
                 }
             } catch (e: IOException) {
-                Log.w(TAG, "Chunk IO error ($start-$end), retry ${attempt + 1}/$CHUNK_RETRIES", e)
+                android.util.Log.w("DownloadWorker", "IOException chunk $start-$end attempt $attempt: ${e.message}")
                 attempt++
-                if (attempt < CHUNK_RETRIES) Thread.sleep(300L * attempt)
+                if (attempt < CHUNK_RETRIES) Thread.sleep(500L * attempt)
             } catch (e: Exception) {
+                android.util.Log.e("DownloadWorker", "Fatal exception in chunk $start-$end", e)
                 return false
             }
         }
+        android.util.Log.e("DownloadWorker", "Chunk $start-$end failed after $CHUNK_RETRIES attempts")
         return false
     }
 
@@ -286,38 +313,59 @@ class DownloadWorker @AssistedInject constructor(
         downloadId : String,
         title      : String
     ): Boolean = withContext(Dispatchers.IO) {
-        val req = cdnRequest(url).build()
+        val req = Request.Builder()
+            .url(url)
+            .header("Accept-Encoding", "identity")
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "*/*")
+            .build()
 
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return@withContext false
-            val body  = resp.body ?: return@withContext false
-            val total = body.contentLength()
-            var done  = 0L
-            val start = System.currentTimeMillis()
-            var lastNotif = 0L
+        try {
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    android.util.Log.e("DownloadWorker", "Streaming HTTP error: ${resp.code}")
+                    return@withContext false
+                }
+                val body  = resp.body ?: return@withContext false
+                val total = body.contentLength()
+                var done  = 0L
+                val start = System.currentTimeMillis()
+                var lastNotif = 0L
+                var errorOccurred = false
 
-            File(outputPath).also { it.parentFile?.mkdirs() }.outputStream().use { out ->
-                val buf = ByteArray(BUFFER_SIZE)
-                body.byteStream().use { stream ->
-                    var n = stream.read(buf)
-                    while (n > 0) {
-                        out.write(buf, 0, n)
-                        done += n
-                        val progress = if (total > 0) ((done * 100) / total).toInt() else 0
-                        setProgressAsync(workDataOf(
-                            KEY_PROGRESS  to progress,
-                            KEY_SPEED_BPS to calcSpeed(done, start)
-                        ))
-                        val now = System.currentTimeMillis()
-                        if (now - lastNotif >= NOTIF_THROTTLE_MS) {
-                            lastNotif = now
-                            notificationHelper.updateProgress(downloadId, title, progress)
+                val outFile = File(outputPath).also { it.parentFile?.mkdirs() }
+                outFile.outputStream().use { out ->
+                    val buf = ByteArray(BUFFER_SIZE)
+                    try {
+                        body.byteStream().use { stream ->
+                            var n = stream.read(buf)
+                            while (n > 0) {
+                                out.write(buf, 0, n)
+                                done += n
+                                val progress = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 99) else 0
+                                setProgressAsync(workDataOf(
+                                    KEY_PROGRESS  to progress,
+                                    KEY_SPEED_BPS to calcSpeed(done, start)
+                                ))
+                                val now = System.currentTimeMillis()
+                                if (now - lastNotif >= NOTIF_THROTTLE_MS) {
+                                    lastNotif = now
+                                    notificationHelper.updateProgress(downloadId, title, progress)
+                                }
+                                n = stream.read(buf)
+                            }
                         }
-                        n = stream.read(buf)
+                    } catch (e: IOException) {
+                        android.util.Log.e("DownloadWorker", "Stream read error: ${e.message}")
+                        errorOccurred = true
                     }
                 }
+                if (errorOccurred) outFile.delete()
+                !errorOccurred && done > 0
             }
-            true
+        } catch (e: Exception) {
+            android.util.Log.e("DownloadWorker", "Streaming download exception", e)
+            false
         }
     }
 
@@ -423,7 +471,10 @@ class DownloadWorker @AssistedInject constructor(
     /** Simple streaming download to file with AtomicLong byte counter */
     private fun simpleStreamToFile(url: String, file: File, counter: AtomicLong): Boolean {
         return try {
-            val req = cdnRequest(url).build()
+            val req = Request.Builder().url(url)
+                .header("Accept-Encoding", "identity")
+                .header("User-Agent", USER_AGENT)
+                .build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return false
                 val body = resp.body ?: return false
@@ -444,38 +495,65 @@ class DownloadWorker @AssistedInject constructor(
 
     // ─────────────────────────────────────────────────────────────────────────
     // MediaMuxer: combine video + audio → final MP4
+    // Supports: H.264/H.265 video + AAC/MP4A audio
+    // Note: MediaMuxer CANNOT mux Opus (WebM) audio into MP4.
+    //       If opus audio is detected, we fall back to copying only the video stream.
     // ─────────────────────────────────────────────────────────────────────────
     private fun muxVideoAudio(videoFile: File, audioFile: File, outFile: File): Boolean {
+        val videoEx = MediaExtractor()
+        val audioEx = MediaExtractor()
+        var muxer: MediaMuxer? = null
+
         return try {
-            val muxer   = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val videoEx = MediaExtractor().apply { setDataSource(videoFile.absolutePath) }
-            val audioEx = MediaExtractor().apply { setDataSource(audioFile.absolutePath) }
+            videoEx.setDataSource(videoFile.absolutePath)
+            audioEx.setDataSource(audioFile.absolutePath)
 
-            var vidIn = -1; var vidOut = -1
+            // Find video track
+            var vidIn = -1
+            var videoMime = ""
             for (i in 0 until videoEx.trackCount) {
-                val fmt = videoEx.getTrackFormat(i)
-                if (fmt.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
-                    vidIn = i; vidOut = muxer.addTrack(fmt); break
-                }
+                val mime = videoEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("video/")) { vidIn = i; videoMime = mime; break }
             }
 
-            var audIn = -1; var audOut = -1
+            // Find audio track
+            var audIn = -1
+            var audioMime = ""
             for (i in 0 until audioEx.trackCount) {
-                val fmt = audioEx.getTrackFormat(i)
-                if (fmt.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
-                    audIn = i; audOut = muxer.addTrack(fmt); break
-                }
+                val mime = audioEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) { audIn = i; audioMime = mime; break }
             }
 
-            if (vidIn < 0 || audIn < 0) { muxer.release(); return false }
+            if (vidIn < 0) {
+                android.util.Log.e("DownloadWorker", "No video track found in: ${videoFile.name}")
+                return false
+            }
+
+            // MediaMuxer can't handle Opus (audio/opus) in MP4 container.
+            // Fall back to video-only if the audio codec is unsupported.
+            val canMuxAudio = audIn >= 0 &&
+                    (audioMime.contains("mp4a") || audioMime.contains("aac") ||
+                     audioMime.contains("3gpp") || audioMime.contains("amr"))
+
+            if (!canMuxAudio && audIn >= 0) {
+                android.util.Log.w("DownloadWorker",
+                    "Unsupported audio codec for MP4 muxer: $audioMime — merging video only")
+            }
+
+            muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            val vidOut = muxer.addTrack(videoEx.getTrackFormat(vidIn))
+            val audOut = if (canMuxAudio) muxer.addTrack(audioEx.getTrackFormat(audIn)) else -1
 
             muxer.start()
             val buf  = ByteBuffer.allocate(2 * 1024 * 1024)  // 2 MB
             val info = MediaCodec.BufferInfo()
 
+            // Write video samples
             videoEx.selectTrack(vidIn)
             videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
             while (true) {
+                buf.clear()
                 info.size = videoEx.readSampleData(buf, 0)
                 if (info.size < 0) break
                 info.presentationTimeUs = videoEx.sampleTime
@@ -484,25 +562,33 @@ class DownloadWorker @AssistedInject constructor(
                 videoEx.advance()
             }
 
-            audioEx.selectTrack(audIn)
-            audioEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-            while (true) {
-                info.size = audioEx.readSampleData(buf, 0)
-                if (info.size < 0) break
-                info.presentationTimeUs = audioEx.sampleTime
-                info.flags              = audioEx.sampleFlags
-                muxer.writeSampleData(audOut, buf, info)
-                audioEx.advance()
+            // Write audio samples (if supported)
+            if (canMuxAudio) {
+                audioEx.selectTrack(audIn)
+                audioEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                while (true) {
+                    buf.clear()
+                    info.size = audioEx.readSampleData(buf, 0)
+                    if (info.size < 0) break
+                    info.presentationTimeUs = audioEx.sampleTime
+                    info.flags              = audioEx.sampleFlags
+                    muxer.writeSampleData(audOut, buf, info)
+                    audioEx.advance()
+                }
             }
 
-            videoEx.release()
-            audioEx.release()
             muxer.stop()
-            muxer.release()
+            android.util.Log.d("DownloadWorker",
+                "Mux complete: ${outFile.name} (${FileUtils.formatFileSize(outFile.length())})")
             true
         } catch (e: Exception) {
+            android.util.Log.e("DownloadWorker", "Mux failed", e)
             outFile.delete()
             false
+        } finally {
+            runCatching { videoEx.release() }
+            runCatching { audioEx.release() }
+            runCatching { muxer?.release() }
         }
     }
 
@@ -511,11 +597,39 @@ class DownloadWorker @AssistedInject constructor(
     // ─────────────────────────────────────────────────────────────────────────
     private fun probeContentLength(url: String): Long {
         return try {
-            val req = cdnRequest(url).head().build()
-            httpClient.newCall(req).execute().use { resp ->
+            // Some CDNs (especially YouTube) reject HEAD but allow GET with Range: bytes=0-0
+            // Try HEAD first, fall back to a tiny GET range request
+            val headReq = Request.Builder().url(url)
+                .head()
+                .header("Accept-Encoding", "identity")
+                .header("User-Agent", USER_AGENT)
+                .build()
+            val headResp = httpClient.newCall(headReq).execute()
+            val headLen  = headResp.header("Content-Length")?.toLong() ?: -1L
+            headResp.close()
+
+            if (headLen > 0) return headLen
+
+            // Fall back: use GET with Range: bytes=0-0 and read Content-Range header
+            val rangeReq = Request.Builder().url(url)
+                .get()
+                .header("Range", "bytes=0-0")
+                .header("Accept-Encoding", "identity")
+                .header("User-Agent", USER_AGENT)
+                .build()
+            httpClient.newCall(rangeReq).execute().use { resp ->
+                // Content-Range: bytes 0-0/TOTAL  → parse TOTAL
+                val contentRange = resp.header("Content-Range")
+                if (contentRange != null) {
+                    val total = contentRange.substringAfterLast("/").trim().toLongOrNull()
+                    if (total != null && total > 0) return total
+                }
                 resp.header("Content-Length")?.toLong() ?: -1L
             }
-        } catch (e: Exception) { -1L }
+        } catch (e: Exception) {
+            android.util.Log.w("DownloadWorker", "probeContentLength failed: ${e.message}")
+            -1L
+        }
     }
 
     private fun calcSpeed(bytes: Long, startMs: Long): Long {
