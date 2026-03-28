@@ -1,7 +1,9 @@
 package com.mediadrop.app.ui
 
-import androidx.compose.animation.*
-import androidx.compose.foundation.background
+import android.os.Build
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -9,110 +11,143 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.navigation.*
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.*
 import com.mediadrop.app.ui.downloads.DownloadsScreen
 import com.mediadrop.app.ui.home.HomeScreen
+import com.mediadrop.app.ui.home.HomeViewModel
+import com.mediadrop.app.ui.settings.PrefKeys
 import com.mediadrop.app.ui.settings.SettingsScreen
+import com.mediadrop.app.ui.settings.ThemeMode
 import com.mediadrop.app.ui.splash.SplashScreen
 import com.mediadrop.app.ui.theme.*
+import kotlinx.coroutines.flow.map
+import javax.inject.Inject
 
-sealed class Screen(val route: String, val label: String) {
-    object Splash    : Screen("splash",    "Splash")
-    object Home      : Screen("home",      "Home")
-    object Downloads : Screen("downloads", "Downloads")
-    object Settings  : Screen("settings",  "Settings")
+// ── Route constants ──────────────────────────────────────────────────────────
+object Routes {
+    const val SPLASH    = "splash"
+    const val MAIN      = "main"
+    const val HOME      = "home"
+    const val DOWNLOADS = "downloads"
+    const val SETTINGS  = "settings"
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MediaDropApp — reads theme preference ONCE at top level, wraps everything
+// ─────────────────────────────────────────────────────────────────────────────
 @Composable
-fun MediaDropApp(sharedUrl: String? = null) {
-    MediaDropTheme {
-        val navController = rememberNavController()
+fun MediaDropApp(
+    dataStore : DataStore<Preferences>,
+    sharedUrl : String? = null
+) {
+    val systemDark  = isSystemInDarkTheme()
+
+    // Collect theme mode from DataStore directly (avoids needing a whole ViewModel here)
+    val themeModeName by dataStore.data
+        .map { it[PrefKeys.THEME_MODE] ?: ThemeMode.DARK.name }
+        .collectAsState(initial = ThemeMode.DARK.name)
+
+    val isDark = when (runCatching { ThemeMode.valueOf(themeModeName) }.getOrElse { ThemeMode.DARK }) {
+        ThemeMode.DARK   -> true
+        ThemeMode.LIGHT  -> false
+        ThemeMode.SYSTEM -> systemDark
+    }
+
+    MediaDropTheme(darkTheme = isDark) {
+        val rootNav = rememberNavController()
 
         NavHost(
-            navController  = navController,
-            startDestination = Screen.Splash.route
+            navController    = rootNav,
+            startDestination = Routes.SPLASH
         ) {
-            // Splash — no bottom bar
             composable(
-                Screen.Splash.route,
+                Routes.SPLASH,
                 enterTransition = { fadeIn() },
                 exitTransition  = { fadeOut() }
             ) {
                 SplashScreen(
                     onFinished = {
-                        navController.navigate(Screen.Home.route) {
-                            popUpTo(Screen.Splash.route) { inclusive = true }
+                        rootNav.navigate(Routes.MAIN) {
+                            popUpTo(Routes.SPLASH) { inclusive = true }
                         }
                     }
                 )
             }
 
-            // Main scaffold with bottom nav
-            composable(Screen.Home.route)      { MainScaffold(navController, sharedUrl) }
-            composable(Screen.Downloads.route) { MainScaffold(navController, null, Screen.Downloads) }
-            composable(Screen.Settings.route)  { MainScaffold(navController, null, Screen.Settings) }
+            // ONE permanent main destination — tab nav lives entirely inside here
+            composable(Routes.MAIN) {
+                MainScreen(sharedUrl = sharedUrl)
+            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+// ─────────────────────────────────────────────────────────────────────────────
+// MainScreen — owns the inner tab NavController, never re-created between tabs
+// ─────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun MainScaffold(
-    rootNav: NavController,
-    sharedUrl: String? = null,
-    initialTab: Screen = Screen.Home
-) {
+fun MainScreen(sharedUrl: String?) {
     val tabNav = rememberNavController()
 
+    val tabs = listOf(
+        TabDef(Routes.HOME,      Icons.Filled.Home,          Icons.Outlined.Home,          "Home"),
+        TabDef(Routes.DOWNLOADS, Icons.Filled.CloudDownload, Icons.Outlined.CloudDownload, "Downloads"),
+        TabDef(Routes.SETTINGS,  Icons.Filled.Settings,      Icons.Outlined.Settings,      "Settings")
+    )
+
     Scaffold(
-        modifier  = Modifier.fillMaxSize(),
-        containerColor = Navy950,
-        bottomBar = {
+        modifier       = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar      = {
             NavigationBar(
-                containerColor = Navy900,
+                containerColor = MaterialTheme.colorScheme.surface,
                 tonalElevation = 0.dp
             ) {
-                val navBackStack by tabNav.currentBackStackEntryAsState()
-                val currentDest  = navBackStack?.destination
+                val backStack   by tabNav.currentBackStackEntryAsState()
+                val currentDest  = backStack?.destination
 
-                listOf(
-                    Triple(Screen.Home,      Icons.Filled.Home,          Icons.Outlined.Home),
-                    Triple(Screen.Downloads, Icons.Filled.CloudDownload,  Icons.Outlined.CloudDownload),
-                    Triple(Screen.Settings,  Icons.Filled.Settings,       Icons.Outlined.Settings)
-                ).forEach { (screen, filledIcon, outlineIcon) ->
-                    val selected = currentDest?.hierarchy?.any { it.route == screen.route } == true
+                tabs.forEach { tab ->
+                    val selected = currentDest?.hierarchy?.any { it.route == tab.route } == true
                     NavigationBarItem(
                         selected = selected,
                         onClick  = {
-                            tabNav.navigate(screen.route) {
-                                popUpTo(tabNav.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState    = true
+                            if (!selected) {
+                                tabNav.navigate(tab.route) {
+                                    popUpTo(tabNav.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState    = true
+                                }
                             }
                         },
-                        icon = {
+                        icon  = {
                             Icon(
-                                if (selected) filledIcon else outlineIcon,
-                                contentDescription = screen.label,
-                                tint = if (selected) Gold500 else Grey400
+                                imageVector        = if (selected) tab.filledIcon else tab.outlineIcon,
+                                contentDescription = tab.label,
+                                tint               = if (selected) MaterialTheme.colorScheme.primary
+                                                     else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         },
                         label = {
                             Text(
-                                screen.label,
-                                color      = if (selected) Gold500 else Grey400,
+                                text       = tab.label,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                style      = MaterialTheme.typography.labelSmall
+                                style      = MaterialTheme.typography.labelSmall,
+                                color      = if (selected) MaterialTheme.colorScheme.primary
+                                             else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         },
                         colors = NavigationBarItemDefaults.colors(
-                            indicatorColor = Gold500.copy(alpha = 0.15f)
+                            indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                         )
                     )
                 }
@@ -121,23 +156,30 @@ private fun MainScaffold(
     ) { innerPadding ->
         NavHost(
             navController    = tabNav,
-            startDestination = initialTab.route,
+            startDestination = Routes.HOME,
             modifier         = Modifier.padding(innerPadding)
         ) {
-            composable(Screen.Home.route) {
-                val vm = androidx.hilt.navigation.compose.hiltViewModel<com.mediadrop.app.ui.home.HomeViewModel>()
+            composable(Routes.HOME) {
+                val vm: HomeViewModel = hiltViewModel()
                 LaunchedEffect(sharedUrl) {
                     if (!sharedUrl.isNullOrBlank()) vm.setUrlFromShare(sharedUrl)
                 }
                 HomeScreen(
-                    viewModel = vm,
+                    viewModel             = vm,
                     onNavigateToDownloads = {
-                        tabNav.navigate(Screen.Downloads.route) { launchSingleTop = true }
+                        tabNav.navigate(Routes.DOWNLOADS) { launchSingleTop = true }
                     }
                 )
             }
-            composable(Screen.Downloads.route) { DownloadsScreen() }
-            composable(Screen.Settings.route)  { SettingsScreen() }
+            composable(Routes.DOWNLOADS) { DownloadsScreen() }
+            composable(Routes.SETTINGS)  { SettingsScreen() }
         }
     }
 }
+
+private data class TabDef(
+    val route       : String,
+    val filledIcon  : androidx.compose.ui.graphics.vector.ImageVector,
+    val outlineIcon : androidx.compose.ui.graphics.vector.ImageVector,
+    val label       : String
+)
