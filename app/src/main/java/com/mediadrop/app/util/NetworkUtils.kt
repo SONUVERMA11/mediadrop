@@ -31,7 +31,7 @@ sealed class MediaError(message: String) : Exception(message) {
     object ParseFailed : MediaError("Parse failed")
     object StorageFull : MediaError("Storage full")
     object FormatUnavailable : MediaError("Format unavailable")
-    data class Unknown(val cause: Throwable) : MediaError(cause.message ?: "Unknown error")
+    data class Unknown(val originalCause: Throwable) : MediaError(originalCause.message ?: "Unknown error")
 
     fun userMessage(): String = when (this) {
         is NoInternet -> "No internet connection. Check your network."
@@ -61,6 +61,6 @@ fun Throwable.toMediaError(): MediaError {
             MediaError.StorageFull
         msg.contains("format") ->
             MediaError.FormatUnavailable
-        else -> MediaError.Unknown(this)
+        else -> MediaError.Unknown(originalCause = this)
     }
 }
