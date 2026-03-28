@@ -5,7 +5,7 @@ on:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,62 +23,52 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
       # ── 3. Android SDK ────────────────────────────────────────────────────────
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ── 4. Grant execute permission to gradlew ───────────────────────────────
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      # ── 4. Setup Gradle ───────────────────────────────────────────────────────
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.6"
+          cache-read-only: false
 
       # ── 5. Create local.properties ───────────────────────────────────────────
       - name: Create local.properties
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "API_BASE_URL=${{ secrets.API_BASE_URL || 'https://placeholder.railway.app/' }}" >> local.properties
+          cat local.properties
 
-      # ── 6. Cache Gradle dependencies ─────────────────────────────────────────
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      # ── 7. Build Debug APK ───────────────────────────────────────────────────
+      # ── 6. Build Debug APK ───────────────────────────────────────────────────
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: gradle assembleDebug --stacktrace --no-daemon
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g -Dkotlin.incremental=false"
 
-      # ── 8. Upload APK artifact ───────────────────────────────────────────────
+      # ── 7. Upload APK artifact ───────────────────────────────────────────────
       - name: Upload Debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: MediaDrop-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      # ── 9. Show APK info ──────────────────────────────────────────────────────
+      # ── 8. APK summary ────────────────────────────────────────────────────────
       - name: APK Info
+        if: success()
         run: |
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-          if [ -f "$APK_PATH" ]; then
-            SIZE=$(du -h "$APK_PATH" | cut -f1)
-            echo "✅ APK built successfully!"
-            echo "📦 Size: $SIZE"
-            echo "📁 Path: $APK_PATH"
-          else
-            echo "❌ APK not found!"
-            exit 1
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$APK" ]; then
+            SIZE=$(du -h "$APK" | cut -f1)
+            echo "✅ APK built successfully! Size: $SIZE"
+            echo "APK_SIZE=$SIZE" >> $GITHUB_OUTPUT
           fi
 
-  # ── Release build (only on tags) ──────────────────────────────────────────
+  # ── Release build (runs only on version tags) ──────────────────────────────
   release:
     name: Build Release APK
     runs-on: ubuntu-latest
@@ -86,21 +76,21 @@ jobs:
     needs: build
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.6"
 
       - name: Create local.properties
         run: |
@@ -108,7 +98,7 @@ jobs:
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> local.properties
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
 
@@ -126,8 +116,7 @@ jobs:
           name: MediaDrop ${{ github.ref_name }}
           body: |
             ## MediaDrop ${{ github.ref_name }}
-            
-            ### Install
-            Download and install the APK on your Android device (Android 7+).
-            
-            > ⚠️ This is an unsigned release build. For production, configure signing in the workflow.
+
+            Universal Video & Media Downloader (Android 7+)
+
+            > ⚠️ Unsigned build — sideload via ADB or use Android Studio for signed installation.
