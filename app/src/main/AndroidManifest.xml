@@ -42,15 +42,48 @@
             </intent-filter>
         </activity>
 
-        <!-- Share Receiver -->
+        <!--
+            Share Receiver — appears in the share sheet of YouTube, Instagram, TikTok, etc.
+            CRITICAL:
+            • android:exported="true" makes it visible to other apps
+            • android:label="DC" is what shows in the share sheet
+            • theme must be a valid theme (use the main app theme)
+            • DEFAULT category is required for share targets
+            • text/plain is what YouTube / most apps send when sharing a URL
+        -->
         <activity
             android:name=".ui.ShareReceiverActivity"
             android:exported="true"
-            android:theme="@style/Theme.MediaDrop.Translucent">
+            android:label="DC"
+            android:icon="@mipmap/ic_launcher"
+            android:theme="@style/Theme.MediaDrop"
+            android:launchMode="singleTask">
+
+            <!-- Receive shared URLs (YouTube, TikTok, Instagram, etc.) -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Also handle VIEW intents (tapping links) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="www.youtube.com" />
+                <data android:scheme="https" android:host="youtu.be" />
+                <data android:scheme="https" android:host="www.instagram.com" />
+                <data android:scheme="https" android:host="www.tiktok.com" />
+                <data android:scheme="https" android:host="vm.tiktok.com" />
+                <data android:scheme="https" android:host="twitter.com" />
+                <data android:scheme="https" android:host="x.com" />
+                <data android:scheme="https" android:host="soundcloud.com" />
+                <data android:scheme="https" android:host="open.spotify.com" />
+                <data android:scheme="https" android:host="www.facebook.com" />
+                <data android:scheme="https" android:host="fb.watch" />
+                <data android:scheme="https" android:host="vimeo.com" />
+                <data android:scheme="https" android:host="music.youtube.com" />
             </intent-filter>
         </activity>
 

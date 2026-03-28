@@ -7,18 +7,20 @@ import java.util.UUID
 @Entity(tableName = "downloads")
 data class DownloadEntity(
     @PrimaryKey
-    val id: String = UUID.randomUUID().toString(),
-    val title: String,
-    val sourceUrl: String,
-    val localPath: String,
-    val format: String,
-    val quality: String,
-    val fileSize: Long = 0L,
-    val platform: String,
-    val thumbnailUrl: String,
-    val status: String = "QUEUED",   // DownloadStatus.name
-    val progress: Int = 0,
-    val speed: String = "",
-    val eta: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val id           : String = UUID.randomUUID().toString(),
+    val title        : String,
+    val sourceUrl    : String,
+    val localPath    : String,
+    val format       : String,          // file extension: mp4, mp3, etc.
+    val formatId     : String = "",     // yt-dlp format id (e.g. "137" for 1080p) — NEW
+    val hasAudio     : Boolean = true,  // false = video-only stream needing merge — NEW
+    val quality      : String,          // "1080p", "720p", "128kbps", etc.
+    val fileSize     : Long = 0L,
+    val platform     : String,
+    val thumbnailUrl : String,
+    val status       : String = "QUEUED",
+    val progress     : Int = 0,
+    val speed        : String = "",
+    val eta          : String = "",
+    val createdAt    : Long = System.currentTimeMillis()
 )

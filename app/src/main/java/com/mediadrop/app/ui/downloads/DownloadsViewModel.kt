@@ -3,15 +3,11 @@ package com.mediadrop.app.ui.downloads
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
+import androidx.work.*
 import com.mediadrop.app.data.local.entity.DownloadEntity
 import com.mediadrop.app.domain.model.DownloadStatus
 import com.mediadrop.app.domain.repository.DownloadRepository
 import com.mediadrop.app.domain.usecase.GetDownloadHistoryUseCase
-import com.mediadrop.app.domain.usecase.StartDownloadUseCase
-import com.mediadrop.app.domain.model.MediaInfo
-import com.mediadrop.app.domain.model.SupportedPlatform
 import com.mediadrop.app.worker.DownloadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -29,7 +25,6 @@ class DownloadsViewModel @Inject constructor(
     @ApplicationContext private val context       : Context,
     private val getDownloadHistoryUseCase         : GetDownloadHistoryUseCase,
     private val downloadRepository                : DownloadRepository,
-    private val startDownloadUseCase              : StartDownloadUseCase,
     private val workManager                       : WorkManager
 ) : ViewModel() {
 
@@ -82,24 +77,42 @@ class DownloadsViewModel @Inject constructor(
         viewModelScope.launch { downloadRepository.deleteDownload(id) }
     }
 
-    /** Retry a failed download using saved metadata */
+    /** Retry a failed download: reuse same DB entry, re-enqueue WorkManager with correct formatId */
     fun retryDownload(item: DownloadEntity) {
         viewModelScope.launch {
-            val fakeInfo = MediaInfo(
-                title        = item.title,
-                thumbnailUrl = item.thumbnailUrl,
-                duration     = 0L,
-                platform     = runCatching { SupportedPlatform.valueOf(item.platform) }
-                                   .getOrElse { SupportedPlatform.detect(item.sourceUrl) },
-                sourceUrl    = item.sourceUrl,
-                videoFormats = emptyList(),
-                audioFormats = emptyList()
-            )
-            // Update status back to QUEUED
+            // Reset status first
             downloadRepository.updateDownloadStatus(item.id, DownloadStatus.QUEUED)
-            runCatching {
-                startDownloadUseCase(fakeInfo, item.format, item.format, item.quality)
-            }
+
+            // Re-enqueue WorkManager with the SAME ID and the REAL format ID
+            // (item.formatId is the yt-dlp format like "137", not the extension "mp4")
+            val formatIdToUse = item.formatId.ifBlank { item.format }
+
+            val inputData = androidx.work.workDataOf(
+                DownloadWorker.KEY_DOWNLOAD_ID to item.id,
+                DownloadWorker.KEY_MEDIA_URL   to item.sourceUrl,
+                DownloadWorker.KEY_FORMAT_ID   to formatIdToUse,
+                DownloadWorker.KEY_FORMAT      to item.format,
+                DownloadWorker.KEY_QUALITY     to item.quality,
+                DownloadWorker.KEY_OUTPUT_PATH to item.localPath,
+                DownloadWorker.KEY_TITLE       to item.title,
+                DownloadWorker.KEY_THUMBNAIL   to item.thumbnailUrl,
+                DownloadWorker.KEY_HAS_AUDIO   to item.hasAudio
+            )
+
+            workManager.enqueueUniqueWork(
+                item.id,
+                androidx.work.ExistingWorkPolicy.REPLACE,
+                androidx.work.OneTimeWorkRequestBuilder<DownloadWorker>()
+                    .setId(java.util.UUID.fromString(item.id))
+                    .setInputData(inputData)
+                    .setConstraints(
+                        androidx.work.Constraints.Builder()
+                            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .addTag(DownloadWorker.TAG_DOWNLOAD)
+                    .build()
+            )
         }
     }
 }

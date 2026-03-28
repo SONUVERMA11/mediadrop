@@ -51,6 +51,8 @@ class StartDownloadUseCase @Inject constructor(
             sourceUrl    = mediaInfo.sourceUrl,
             localPath    = outputPath,
             format       = format,
+            formatId     = formatId,   // ← store the real yt-dlp format ID (e.g. "137")
+            hasAudio     = hasAudio,   // ← store so retry knows to merge audio
             quality      = quality,
             fileSize     = 0L,
             platform     = mediaInfo.platform.name,
