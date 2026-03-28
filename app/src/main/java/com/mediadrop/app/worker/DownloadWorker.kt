@@ -2,6 +2,7 @@ package com.mediadrop.app.worker
 
 import android.content.Context
 import android.media.MediaCodec
+import android.util.Log
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
@@ -59,6 +60,12 @@ class DownloadWorker @AssistedInject constructor(
         private const val TIMEOUT_CONN  = 20L
         private const val TIMEOUT_READ  = 90L
         private const val NOTIF_THROTTLE_MS = 400L    // max notification update rate
+        private const val TAG = "DownloadWorker"
+
+        // Browser User-Agent — CDNs (YouTube, Instagram, etc.) reject requests without one
+        private const val BROWSER_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -75,6 +82,23 @@ class DownloadWorker @AssistedInject constructor(
         .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
         .build()
 
+    /** Original page URL — used as Referer header for CDN requests */
+    @Volatile private var referer = ""
+
+    /**
+     * Build a CDN request with standard browser headers.
+     * Without these, YouTube / Instagram / TikTok CDNs return 403 Forbidden.
+     */
+    private fun cdnRequest(url: String): Request.Builder =
+        Request.Builder()
+            .url(url)
+            .header("User-Agent", BROWSER_UA)
+            .header("Accept", "*/*")
+            .header("Accept-Language", "en-US,en;q=0.5")
+            .header("Accept-Encoding", "identity")
+            .header("Referer", referer)
+            .header("Connection", "keep-alive")
+
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val title = inputData.getString(KEY_TITLE) ?: "Downloading…"
         val id    = inputData.getString(KEY_DOWNLOAD_ID) ?: this.id.toString()
@@ -90,6 +114,9 @@ class DownloadWorker @AssistedInject constructor(
         val title      = inputData.getString(KEY_TITLE)        ?: "Media"
         val hasAudio   = inputData.getBoolean(KEY_HAS_AUDIO, true)
 
+        referer = mediaUrl   // set before any CDN requests so Referer header is correct
+        Log.d(TAG, "Starting download: id=$downloadId format=$formatId hasAudio=$hasAudio")
+
         setForeground(notificationHelper.createForegroundInfo(downloadId, title, 0))
         downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.DOWNLOADING)
 
@@ -97,6 +124,7 @@ class DownloadWorker @AssistedInject constructor(
             // ── 1. Resolve CDN URL(s) from backend ────────────────────────
             val urlDtoResult = mediaRepository.getDownloadUrlDto(mediaUrl, formatId, hasAudio)
             if (urlDtoResult.isFailure) {
+                Log.e(TAG, "Failed to resolve CDN URL for $mediaUrl: ${urlDtoResult.exceptionOrNull()}")
                 downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
                 return@withContext if (runAttemptCount < 2) Result.retry() else Result.failure()
             }
@@ -124,15 +152,18 @@ class DownloadWorker @AssistedInject constructor(
                 setProgressAsync(workDataOf(KEY_PROGRESS to 100))
                 Result.success()
             } else {
+                Log.e(TAG, "Download failed for $title (attempt ${runAttemptCount + 1})")
                 downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
                 notificationHelper.cancelNotification(downloadId)
                 if (runAttemptCount < 2) Result.retry() else Result.failure()
             }
         } catch (e: CancellationException) {
+            Log.w(TAG, "Download cancelled: $title")
             downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
             notificationHelper.cancelNotification(downloadId)
             Result.failure()
         } catch (e: Exception) {
+            Log.e(TAG, "Download exception for $title (attempt ${runAttemptCount + 1})", e)
             downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
             notificationHelper.cancelNotification(downloadId)
             if (runAttemptCount < 2) Result.retry() else Result.failure()
@@ -210,15 +241,13 @@ class DownloadWorker @AssistedInject constructor(
         var attempt = 0
         while (attempt < CHUNK_RETRIES) {
             try {
-                val req = Request.Builder()
-                    .url(url)
+                val req = cdnRequest(url)
                     .header("Range", "bytes=$start-$end")
-                    .header("Accept-Encoding", "identity")
-                    .header("Connection", "keep-alive")
                     .build()
 
                 httpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful && resp.code != 206) {
+                        Log.w(TAG, "Chunk $start-$end failed: HTTP ${resp.code}")
                         attempt++; return@use
                     }
                     val body = resp.body ?: run { attempt++; return@use }
@@ -238,6 +267,7 @@ class DownloadWorker @AssistedInject constructor(
                     return true
                 }
             } catch (e: IOException) {
+                Log.w(TAG, "Chunk IO error ($start-$end), retry ${attempt + 1}/$CHUNK_RETRIES", e)
                 attempt++
                 if (attempt < CHUNK_RETRIES) Thread.sleep(300L * attempt)
             } catch (e: Exception) {
@@ -256,10 +286,7 @@ class DownloadWorker @AssistedInject constructor(
         downloadId : String,
         title      : String
     ): Boolean = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(url)
-            .header("Accept-Encoding", "identity")
-            .build()
+        val req = cdnRequest(url).build()
 
         httpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return@withContext false
@@ -396,8 +423,7 @@ class DownloadWorker @AssistedInject constructor(
     /** Simple streaming download to file with AtomicLong byte counter */
     private fun simpleStreamToFile(url: String, file: File, counter: AtomicLong): Boolean {
         return try {
-            val req = Request.Builder().url(url)
-                .header("Accept-Encoding", "identity").build()
+            val req = cdnRequest(url).build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return false
                 val body = resp.body ?: return false
@@ -485,8 +511,7 @@ class DownloadWorker @AssistedInject constructor(
     // ─────────────────────────────────────────────────────────────────────────
     private fun probeContentLength(url: String): Long {
         return try {
-            val req = Request.Builder().url(url).head()
-                .header("Accept-Encoding", "identity").build()
+            val req = cdnRequest(url).head().build()
             httpClient.newCall(req).execute().use { resp ->
                 resp.header("Content-Length")?.toLong() ?: -1L
             }
