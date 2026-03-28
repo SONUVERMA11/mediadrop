@@ -83,6 +83,8 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.appcompat)
+    implementation(libs.material)
 
     // Compose BOM
     val composeBom = platform(libs.compose.bom)
