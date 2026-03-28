@@ -21,13 +21,11 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.StandardOpenOption
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
-import kotlin.math.min
 
 @HiltWorker
 class DownloadWorker @AssistedInject constructor(
@@ -52,31 +50,28 @@ class DownloadWorker @AssistedInject constructor(
         const val KEY_SPEED_BPS   = "SPEED_BPS"
         const val TAG_DOWNLOAD    = "download_worker"
 
-        // ── Speed tuning ────────────────────────────────────────────────────
-        private const val CHUNKS        = 32          // 32 parallel HTTP range connections
-        private const val BUFFER_SIZE   = 2_097_152   // 2 MB NIO direct buffer per chunk
-        private const val CHUNK_RETRIES = 3           // retry each chunk up to 3× on failure
-        private const val TIMEOUT_CONN  = 15L         // connect timeout (seconds)
-        private const val TIMEOUT_READ  = 60L         // read timeout (seconds)
+        // ── Reliable + fast tuning ────────────────────────────────────────
+        // 8 chunks: enough to saturate any mobile CDN without deadlocking threads
+        // 512 KB buffer: large enough for throughput, small enough for memory
+        private const val CHUNKS        = 8
+        private const val BUFFER_SIZE   = 524_288     // 512 KB
+        private const val CHUNK_RETRIES = 3
+        private const val TIMEOUT_CONN  = 20L
+        private const val TIMEOUT_READ  = 90L
+        private const val NOTIF_THROTTLE_MS = 400L    // max notification update rate
     }
 
-    // ── Aggressively tuned HTTP client ─────────────────────────────────────
-    // • Large connection pool: 32 idle connections, 10-min keep-alive
-    // • Dispatcher: 64 max global, 32 per host — saturates CDN connections
-    // • followRedirects + retryOnConnectionFailure for resilience
     private val httpClient = OkHttpClient.Builder()
-        .connectionPool(ConnectionPool(32, 10, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
         .dispatcher(Dispatcher().apply {
-            maxRequests        = 64
-            maxRequestsPerHost = 32
+            maxRequests        = 32
+            maxRequestsPerHost = 16
         })
         .connectTimeout(TIMEOUT_CONN, TimeUnit.SECONDS)
         .readTimeout(TIMEOUT_READ, TimeUnit.SECONDS)
-        .writeTimeout(TIMEOUT_READ, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .retryOnConnectionFailure(true)
-        // Disable minSpeed / maxSpeed throttle on Android radio
         .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
         .build()
 
@@ -99,7 +94,7 @@ class DownloadWorker @AssistedInject constructor(
         downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.DOWNLOADING)
 
         return@withContext try {
-            // ── 1. Resolve CDN URL(s) ─────────────────────────────────────
+            // ── 1. Resolve CDN URL(s) from backend ────────────────────────
             val urlDtoResult = mediaRepository.getDownloadUrlDto(mediaUrl, formatId, hasAudio)
             if (urlDtoResult.isFailure) {
                 downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
@@ -107,20 +102,18 @@ class DownloadWorker @AssistedInject constructor(
             }
             val urlDto   = urlDtoResult.getOrThrow()
             val videoUrl = urlDto.url
-            val audioUrl = urlDto.audioUrl
+            val audioUrl = urlDto.audioUrl   // non-null → format is video-only
 
-            // ── 2. Pre-warm connection to CDN (hides first-packet latency) ─
-            launch { preWarm(videoUrl) }
-            if (audioUrl != null) launch { preWarm(audioUrl) }
-
-            // ── 3. Download ───────────────────────────────────────────────
-            val success = if (audioUrl != null) {
-                // Video-only stream: parallel download both, then MediaMuxer merge
-                downloadAndMerge(videoUrl, audioUrl, outputPath, downloadId, title, format)
+            // ── 2. Download ────────────────────────────────────────────────
+            val success = if (!audioUrl.isNullOrBlank()) {
+                // Video-only format: download video + audio concurrently, then merge
+                downloadAndMerge(videoUrl, audioUrl, outputPath, downloadId, title)
             } else {
                 val len = probeContentLength(videoUrl)
-                if (len > 0) chunkedDownload(videoUrl, outputPath, len, downloadId, title)
-                else         streamingDownload(videoUrl, outputPath, downloadId, title)
+                when {
+                    len > 0 -> chunkedDownload(videoUrl, outputPath, len, downloadId, title)
+                    else    -> streamingDownload(videoUrl, outputPath, downloadId, title)
+                }
             }
 
             if (success) {
@@ -147,8 +140,8 @@ class DownloadWorker @AssistedInject constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // CHUNKED PARALLEL DOWNLOAD  (32 concurrent range requests)
-    // Uses NIO FileChannel + direct ByteBuffer for maximum I/O throughput
+    // 8-CHUNK PARALLEL DOWNLOAD using RandomAccessFile
+    // Progress is reported from a supervisory coroutine — NO runBlocking in hot path
     // ─────────────────────────────────────────────────────────────────────────
     private suspend fun chunkedDownload(
         url        : String,
@@ -161,57 +154,58 @@ class DownloadWorker @AssistedInject constructor(
         val outFile = File(outputPath).also { it.parentFile?.mkdirs() }
 
         // Pre-allocate file space (avoids fragmentation, faster write)
-        FileChannel.open(
-            outFile.toPath(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE
-        ).use { ch -> ch.truncate(contentLen) }
+        RandomAccessFile(outFile, "rw").use { it.setLength(contentLen) }
 
         val downloaded   = AtomicLong(0)
         val startTime    = System.currentTimeMillis()
-        var lastProgress = -1
-        var lastNotif    = 0L
+        val chunkSize    = contentLen / CHUNKS
 
-        fun reportProgress() {
-            val done     = downloaded.get()
-            val progress = ((done * 100) / contentLen).toInt().coerceIn(0, 100)
-            if (progress != lastProgress) {
-                lastProgress = progress
-                setProgressAsync(workDataOf(
-                    KEY_PROGRESS  to progress,
-                    KEY_SPEED_BPS to calcSpeed(done, startTime)
-                ))
-                val now = System.currentTimeMillis()
-                if (now - lastNotif > 300) {
-                    lastNotif = now
-                    notificationHelper.updateProgress(downloadId, title, progress)
-                }
-            }
-        }
-
-        val chunkSize = contentLen / CHUNKS
-
+        // Chunk download jobs — NO progress callbacks inside to avoid deadlock
         val jobs = (0 until CHUNKS).map { i ->
             val start = i * chunkSize
             val end   = if (i == CHUNKS - 1) contentLen - 1 else start + chunkSize - 1
             async(Dispatchers.IO) {
-                downloadChunk(url, outFile, start, end, downloaded) { reportProgress() }
+                downloadChunkRaf(url, outFile, start, end, downloaded)
             }
         }
 
-        jobs.awaitAll().all { it }
+        // Progress reporter — runs in parallel on a timer, never blocks chunks
+        val reporterJob = launch {
+            var lastProgress = -1
+            var lastNotif    = 0L
+            while (jobs.any { !it.isCompleted }) {
+                val done     = downloaded.get()
+                val progress = ((done * 100) / contentLen).toInt().coerceIn(0, 99)
+                if (progress != lastProgress) {
+                    lastProgress = progress
+                    setProgressAsync(workDataOf(
+                        KEY_PROGRESS  to progress,
+                        KEY_SPEED_BPS to calcSpeed(done, startTime)
+                    ))
+                    val now = System.currentTimeMillis()
+                    if (now - lastNotif >= NOTIF_THROTTLE_MS) {
+                        lastNotif = now
+                        notificationHelper.updateProgress(downloadId, title, progress)
+                    }
+                }
+                delay(200)
+            }
+        }
+
+        val results = jobs.awaitAll()
+        reporterJob.cancel()
+        results.all { it }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SINGLE CHUNK download — with per-chunk retry + NIO FileChannel writes
+    // Single chunk download to RandomAccessFile (blocking, runs on IO thread)
     // ─────────────────────────────────────────────────────────────────────────
-    private fun downloadChunk(
+    private fun downloadChunkRaf(
         url          : String,
         file         : File,
         start        : Long,
         end          : Long,
-        totalDownloaded: AtomicLong,
-        onProgress   : () -> Unit
+        totalBytes   : AtomicLong
     ): Boolean {
         var attempt = 0
         while (attempt < CHUNK_RETRIES) {
@@ -219,7 +213,7 @@ class DownloadWorker @AssistedInject constructor(
                 val req = Request.Builder()
                     .url(url)
                     .header("Range", "bytes=$start-$end")
-                    .header("Accept-Encoding", "identity")   // no gzip overhead on binary data
+                    .header("Accept-Encoding", "identity")
                     .header("Connection", "keep-alive")
                     .build()
 
@@ -229,24 +223,15 @@ class DownloadWorker @AssistedInject constructor(
                     }
                     val body = resp.body ?: run { attempt++; return@use }
 
-                    // NIO FileChannel write — significantly faster than RandomAccessFile
-                    FileChannel.open(
-                        file.toPath(),
-                        StandardOpenOption.WRITE
-                    ).use { channel ->
-                        channel.position(start)
-                        val directBuf = ByteBuffer.allocateDirect(min(BUFFER_SIZE.toLong(), end - start + 1).toInt())
+                    RandomAccessFile(file, "rw").use { raf ->
+                        raf.seek(start)
+                        val buf = ByteArray(BUFFER_SIZE)
                         body.byteStream().use { stream ->
-                            val javaBuf = ByteArray(directBuf.capacity())
-                            var n = stream.read(javaBuf)
+                            var n = stream.read(buf)
                             while (n > 0) {
-                                directBuf.clear()
-                                directBuf.put(javaBuf, 0, n)
-                                directBuf.flip()
-                                while (directBuf.hasRemaining()) channel.write(directBuf)
-                                totalDownloaded.addAndGet(n.toLong())
-                                onProgress()
-                                n = stream.read(javaBuf)
+                                raf.write(buf, 0, n)
+                                totalBytes.addAndGet(n.toLong())
+                                n = stream.read(buf)
                             }
                         }
                     }
@@ -254,7 +239,7 @@ class DownloadWorker @AssistedInject constructor(
                 }
             } catch (e: IOException) {
                 attempt++
-                if (attempt < CHUNK_RETRIES) Thread.sleep(200L * attempt)
+                if (attempt < CHUNK_RETRIES) Thread.sleep(300L * attempt)
             } catch (e: Exception) {
                 return false
             }
@@ -263,7 +248,7 @@ class DownloadWorker @AssistedInject constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // STREAMING FALLBACK (server doesn't support Range requests)
+    // STREAMING FALLBACK (server doesn't support Range)
     // ─────────────────────────────────────────────────────────────────────────
     private suspend fun streamingDownload(
         url        : String,
@@ -274,7 +259,6 @@ class DownloadWorker @AssistedInject constructor(
         val req = Request.Builder()
             .url(url)
             .header("Accept-Encoding", "identity")
-            .header("Connection", "keep-alive")
             .build()
 
         httpClient.newCall(req).execute().use { resp ->
@@ -285,29 +269,24 @@ class DownloadWorker @AssistedInject constructor(
             val start = System.currentTimeMillis()
             var lastNotif = 0L
 
-            FileChannel.open(
-                File(outputPath).also { it.parentFile?.mkdirs() }.toPath(),
-                StandardOpenOption.CREATE, StandardOpenOption.WRITE
-            ).use { channel ->
-                val directBuf = ByteBuffer.allocateDirect(BUFFER_SIZE)
-                val javaBuf   = ByteArray(BUFFER_SIZE)
+            File(outputPath).also { it.parentFile?.mkdirs() }.outputStream().use { out ->
+                val buf = ByteArray(BUFFER_SIZE)
                 body.byteStream().use { stream ->
-                    var n = stream.read(javaBuf)
+                    var n = stream.read(buf)
                     while (n > 0) {
-                        directBuf.clear()
-                        directBuf.put(javaBuf, 0, n)
-                        directBuf.flip()
-                        while (directBuf.hasRemaining()) channel.write(directBuf)
+                        out.write(buf, 0, n)
                         done += n
                         val progress = if (total > 0) ((done * 100) / total).toInt() else 0
-                        setProgressAsync(workDataOf(KEY_PROGRESS to progress,
-                            KEY_SPEED_BPS to calcSpeed(done, start)))
+                        setProgressAsync(workDataOf(
+                            KEY_PROGRESS  to progress,
+                            KEY_SPEED_BPS to calcSpeed(done, start)
+                        ))
                         val now = System.currentTimeMillis()
-                        if (now - lastNotif > 300) {
+                        if (now - lastNotif >= NOTIF_THROTTLE_MS) {
                             lastNotif = now
                             notificationHelper.updateProgress(downloadId, title, progress)
                         }
-                        n = stream.read(javaBuf)
+                        n = stream.read(buf)
                     }
                 }
             }
@@ -316,18 +295,19 @@ class DownloadWorker @AssistedInject constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // VIDEO + AUDIO concurrent download + MediaMuxer merge
+    // VIDEO + AUDIO concurrent download then MediaMuxer merge
+    // Each stream uses its own chunked parallel download
     // ─────────────────────────────────────────────────────────────────────────
     private suspend fun downloadAndMerge(
         videoUrl  : String,
         audioUrl  : String,
         outputPath: String,
         downloadId: String,
-        title     : String,
-        format    : String
+        title     : String
     ): Boolean = withContext(Dispatchers.IO) {
         val tempVideo = File("$outputPath.v.tmp")
         val tempAudio = File("$outputPath.a.tmp")
+
         try {
             val videoLen = probeContentLength(videoUrl)
             val audioLen = probeContentLength(audioUrl)
@@ -336,87 +316,99 @@ class DownloadWorker @AssistedInject constructor(
             val videoDone    = AtomicLong(0)
             val audioDone    = AtomicLong(0)
             val startTime    = System.currentTimeMillis()
-            var lastProgress = -1
 
-            suspend fun reportCombined() {
-                val done     = videoDone.get() + audioDone.get()
-                // Map to 0-90% (last 10% reserved for muxing)
-                val progress = ((done * 90) / total).toInt().coerceIn(0, 90)
-                if (progress != lastProgress) {
-                    lastProgress = progress
-                    setProgressAsync(workDataOf(
-                        KEY_PROGRESS  to progress,
-                        KEY_SPEED_BPS to calcSpeed(done, startTime)
-                    ))
-                    notificationHelper.updateProgress(downloadId, title, progress)
+            // Pre-allocate temp files if we know sizes
+            if (videoLen > 0) RandomAccessFile(tempVideo, "rw").use { it.setLength(videoLen) }
+            if (audioLen > 0) RandomAccessFile(tempAudio, "rw").use { it.setLength(audioLen) }
+
+            // Launch progress reporter (no blocking in chunk callbacks)
+            val progressJob = launch {
+                var last = -1
+                var lastNotif = 0L
+                while (isActive) {
+                    val done     = videoDone.get() + audioDone.get()
+                    val progress = ((done * 90) / total).toInt().coerceIn(0, 90)
+                    if (progress != last) {
+                        last = progress
+                        setProgressAsync(workDataOf(
+                            KEY_PROGRESS  to progress,
+                            KEY_SPEED_BPS to calcSpeed(done, startTime)
+                        ))
+                        val now = System.currentTimeMillis()
+                        if (now - lastNotif >= NOTIF_THROTTLE_MS) {
+                            lastNotif = now
+                            notificationHelper.updateProgress(downloadId, title, progress)
+                        }
+                    }
+                    delay(200)
                 }
             }
 
             // Download video and audio at full speed simultaneously
             val videoJob = async(Dispatchers.IO) {
-                if (videoLen > 0) {
-                    FileChannel.open(tempVideo.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-                        .use { it.truncate(videoLen) }
-                    val chunkSz = videoLen / CHUNKS
+                val chunkSz = if (videoLen > 0) videoLen / CHUNKS else 0L
+                if (chunkSz > 0) {
                     (0 until CHUNKS).map { i ->
                         val s = i * chunkSz
                         val e = if (i == CHUNKS - 1) videoLen - 1 else s + chunkSz - 1
-                        async(Dispatchers.IO) { downloadChunk(videoUrl, tempVideo, s, e, videoDone) { runBlocking { reportCombined() } } }
+                        async(Dispatchers.IO) { downloadChunkRaf(videoUrl, tempVideo, s, e, videoDone) }
                     }.awaitAll().all { it }
                 } else {
-                    streamingToFile(videoUrl, tempVideo) { n -> videoDone.addAndGet(n.toLong()); runBlocking { reportCombined() } }
+                    simpleStreamToFile(videoUrl, tempVideo, videoDone)
                 }
             }
+
             val audioJob = async(Dispatchers.IO) {
-                if (audioLen > 0) {
-                    FileChannel.open(tempAudio.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-                        .use { it.truncate(audioLen) }
-                    val chunkSz = audioLen / CHUNKS
+                val chunkSz = if (audioLen > 0) audioLen / CHUNKS else 0L
+                if (chunkSz > 0) {
                     (0 until CHUNKS).map { i ->
                         val s = i * chunkSz
                         val e = if (i == CHUNKS - 1) audioLen - 1 else s + chunkSz - 1
-                        async(Dispatchers.IO) { downloadChunk(audioUrl, tempAudio, s, e, audioDone) { runBlocking { reportCombined() } } }
+                        async(Dispatchers.IO) { downloadChunkRaf(audioUrl, tempAudio, s, e, audioDone) }
                     }.awaitAll().all { it }
                 } else {
-                    streamingToFile(audioUrl, tempAudio) { n -> audioDone.addAndGet(n.toLong()); runBlocking { reportCombined() } }
+                    simpleStreamToFile(audioUrl, tempAudio, audioDone)
                 }
             }
 
-            if (!videoJob.await() || !audioJob.await()) return@withContext false
+            val videoOk = videoJob.await()
+            val audioOk = audioJob.await()
+            progressJob.cancel()
 
-            // Mux at 91–100%
+            if (!videoOk || !audioOk) return@withContext false
+
+            // Mux: 92–100%
             setProgressAsync(workDataOf(KEY_PROGRESS to 92))
             notificationHelper.updateProgress(downloadId, title, 92)
 
-            val ok = muxVideoAudio(tempVideo, tempAudio, File(outputPath))
-            if (ok) {
+            val muxOk = muxVideoAudio(tempVideo, tempAudio, File(outputPath))
+            if (muxOk) {
                 setProgressAsync(workDataOf(KEY_PROGRESS to 100))
                 notificationHelper.updateProgress(downloadId, title, 100)
             }
-            ok
+            muxOk
         } finally {
             tempVideo.delete()
             tempAudio.delete()
         }
     }
 
-    private fun streamingToFile(url: String, file: File, onBytes: (Int) -> Unit): Boolean {
+    /** Simple streaming download to file with AtomicLong byte counter */
+    private fun simpleStreamToFile(url: String, file: File, counter: AtomicLong): Boolean {
         return try {
             val req = Request.Builder().url(url)
                 .header("Accept-Encoding", "identity").build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return false
                 val body = resp.body ?: return false
-                FileChannel.open(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
-                    val directBuf = ByteBuffer.allocateDirect(BUFFER_SIZE)
-                    val javaBuf   = ByteArray(BUFFER_SIZE)
-                    body.byteStream().use { stream ->
-                        var n = stream.read(javaBuf)
-                        while (n > 0) {
-                            directBuf.clear(); directBuf.put(javaBuf, 0, n); directBuf.flip()
-                            while (directBuf.hasRemaining()) ch.write(directBuf)
-                            onBytes(n); n = stream.read(javaBuf)
-                        }
+                file.outputStream().use { out ->
+                    val buf    = ByteArray(BUFFER_SIZE)
+                    val stream = body.byteStream()
+                    var n      = stream.read(buf)
+                    while (n > 0) {
+                        out.write(buf, 0, n)
+                        counter.addAndGet(n.toLong())
+                        n = stream.read(buf)
                     }
                 }
                 true
@@ -425,11 +417,11 @@ class DownloadWorker @AssistedInject constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MediaMuxer: combine video + audio temp files → final MP4
+    // MediaMuxer: combine video + audio → final MP4
     // ─────────────────────────────────────────────────────────────────────────
     private fun muxVideoAudio(videoFile: File, audioFile: File, outFile: File): Boolean {
         return try {
-            val muxer  = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val muxer   = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val videoEx = MediaExtractor().apply { setDataSource(videoFile.absolutePath) }
             val audioEx = MediaExtractor().apply { setDataSource(audioFile.absolutePath) }
 
@@ -440,6 +432,7 @@ class DownloadWorker @AssistedInject constructor(
                     vidIn = i; vidOut = muxer.addTrack(fmt); break
                 }
             }
+
             var audIn = -1; var audOut = -1
             for (i in 0 until audioEx.trackCount) {
                 val fmt = audioEx.getTrackFormat(i)
@@ -449,9 +442,9 @@ class DownloadWorker @AssistedInject constructor(
             }
 
             if (vidIn < 0 || audIn < 0) { muxer.release(); return false }
-            muxer.start()
 
-            val buf  = ByteBuffer.allocate(4 * 1024 * 1024)   // 4 MB mux buffer
+            muxer.start()
+            val buf  = ByteBuffer.allocate(2 * 1024 * 1024)  // 2 MB
             val info = MediaCodec.BufferInfo()
 
             videoEx.selectTrack(vidIn)
@@ -460,7 +453,7 @@ class DownloadWorker @AssistedInject constructor(
                 info.size = videoEx.readSampleData(buf, 0)
                 if (info.size < 0) break
                 info.presentationTimeUs = videoEx.sampleTime
-                info.flags = videoEx.sampleFlags
+                info.flags              = videoEx.sampleFlags
                 muxer.writeSampleData(vidOut, buf, info)
                 videoEx.advance()
             }
@@ -471,22 +464,25 @@ class DownloadWorker @AssistedInject constructor(
                 info.size = audioEx.readSampleData(buf, 0)
                 if (info.size < 0) break
                 info.presentationTimeUs = audioEx.sampleTime
-                info.flags = audioEx.sampleFlags
+                info.flags              = audioEx.sampleFlags
                 muxer.writeSampleData(audOut, buf, info)
                 audioEx.advance()
             }
 
-            videoEx.release(); audioEx.release()
-            muxer.stop(); muxer.release()
+            videoEx.release()
+            audioEx.release()
+            muxer.stop()
+            muxer.release()
             true
-        } catch (e: Exception) { outFile.delete(); false }
+        } catch (e: Exception) {
+            outFile.delete()
+            false
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
-
-    /** HEAD request to get Content-Length. Returns -1 if server doesn't support it. */
     private fun probeContentLength(url: String): Long {
         return try {
             val req = Request.Builder().url(url).head()
@@ -497,18 +493,8 @@ class DownloadWorker @AssistedInject constructor(
         } catch (e: Exception) { -1L }
     }
 
-    /** Fires a GET and immediately closes it — warms TCP connection + TLS in the pool */
-    private fun preWarm(url: String) {
-        try {
-            httpClient.newCall(
-                Request.Builder().url(url).head()
-                    .header("Accept-Encoding", "identity").build()
-            ).execute().close()
-        } catch (_: Exception) {}
-    }
-
     private fun calcSpeed(bytes: Long, startMs: Long): Long {
         val elapsed = max(1L, System.currentTimeMillis() - startMs)
-        return (bytes * 1000L) / elapsed   // bytes per second
+        return (bytes * 1000L) / elapsed
     }
 }
