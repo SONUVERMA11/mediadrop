@@ -14,13 +14,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val sharedUrl = intent?.getStringExtra("SHARED_URL")
-        val navigateToDownloads = intent?.getBooleanExtra("navigate_to_downloads", false) ?: false
 
         setContent {
-            MediaDropApp(
-                startRoute = if (navigateToDownloads) Screen.Downloads.route else Screen.Home.route,
-                sharedUrl = sharedUrl
-            )
+            MediaDropApp(sharedUrl = sharedUrl)
         }
     }
 }
