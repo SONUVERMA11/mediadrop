@@ -1,0 +1,8 @@
+# Copy this file to local.properties and fill in your values.
+# local.properties is excluded from version control.
+
+sdk.dir=C\:\\Users\\YourName\\AppData\\Local\\Android\\Sdk
+
+# Self-hosted yt-dlp API base URL (include trailing slash)
+# Example: https://your-app.railway.app/
+API_BASE_URL=https://your-ytdlp-api.railway.app/

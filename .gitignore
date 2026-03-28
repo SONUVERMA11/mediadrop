@@ -1,0 +1,23 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Generated build outputs
+app/build/
+app/schemas/
+
+# API keys / secrets
+*.keystore
+keystore.properties
+
+# Backend virtualenv
+backend/venv/
+backend/__pycache__/
+backend/*.pyc

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_purple">#6200EE</color>
+    <color name="brand_purple_light">#9C4DFF</color>
+    <color name="brand_purple_dark">#3700B3</color>
+    <color name="brand_teal">#03DAC5</color>
+    <color name="brand_teal_dark">#018786</color>
+    <color name="background_dark">#0F0F0F</color>
+    <color name="background_light">#FAFAFA</color>
+    <color name="status_success">#30D158</color>
+    <color name="status_error">#FF453A</color>
+    <color name="status_warning">#FF9F0A</color>
+</resources>

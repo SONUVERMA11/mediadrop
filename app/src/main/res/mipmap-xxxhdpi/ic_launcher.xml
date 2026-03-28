@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Placeholder vector launcher icon for API < 26 compatibility.
+    Replace these with actual PNG bitmaps generated via Android Studio:
+    Right-click res → New → Image Asset → choose Launcher Icons.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Background -->
+    <path
+        android:pathData="M0,0h48v48h-48z"
+        android:fillColor="#0F0F0F" />
+    <!-- Circle -->
+    <path
+        android:pathData="M24,24m-20,0a20,20 0,1 1,40 0a20,20 0,1 1,-40 0"
+        android:fillColor="#6200EE" />
+    <!-- Arrow down -->
+    <path
+        android:pathData="M24,12 L24,30 M16,24 L24,32 L32,24"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="@android:color/transparent" />
+    <!-- Base -->
+    <path
+        android:pathData="M16,36 L32,36"
+        android:strokeColor="#03DAC5"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent" />
+</vector>
