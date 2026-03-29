@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Opt into Node.js 24 to silence deprecation warnings
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     name: Build Debug APK
@@ -23,6 +27,7 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
 
       # ── 3. Android SDK ────────────────────────────────────────────────────────
       - name: Setup Android SDK
@@ -30,7 +35,7 @@ jobs:
 
       # ── 4. Setup Gradle ───────────────────────────────────────────────────────
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.6"
           cache-read-only: false
@@ -40,13 +45,14 @@ jobs:
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "API_BASE_URL=${{ secrets.API_BASE_URL || 'https://placeholder.railway.app/' }}" >> local.properties
+          echo "local.properties created:"
           cat local.properties
 
       # ── 6. Build Debug APK ───────────────────────────────────────────────────
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace --no-daemon
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g -Dkotlin.incremental=false"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -Dkotlin.incremental=false"
 
       # ── 7. Upload APK artifact ───────────────────────────────────────────────
       - name: Upload Debug APK
@@ -83,12 +89,13 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.6"
 
@@ -98,9 +105,9 @@ jobs:
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> local.properties
 
       - name: Build Release APK
-        run: gradle assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g"
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -110,7 +117,7 @@ jobs:
           retention-days: 90
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: app/build/outputs/apk/release/app-release-unsigned.apk
           name: MediaDrop ${{ github.ref_name }}
