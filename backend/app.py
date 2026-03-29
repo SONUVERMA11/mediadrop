@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-MediaDrop – yt-dlp Flask Backend
-Architecture: Proxy-download mode.
-  - /info          → returns media metadata + format list
-  - /download      → streams the actual file bytes to the client (proxy mode)
-  - /playlist-info → returns flat playlist info
-  - /health        → liveness probe
-
-WHY PROXY MODE:
-  yt-dlp CDN URLs (especially YouTube) are signed to the server IP.
-  Passing raw CDN URLs to the Android app causes 403 Forbidden because
-  the device IP differs from the Railway server IP that fetched the URL.
-  Solution: backend fetches the bytes and streams them directly to the app.
+MediaDrop Backend — Proxy-download mode.
+  GET /health          — liveness probe
+  GET /info            — media metadata + format list (no CDN URLs)
+  GET /download        — proxies the actual bytes to the client
+  GET /playlist-info   — flat playlist entries
 """
 
 import os
@@ -22,98 +15,88 @@ import requests
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 
-app = Flask(__name__)
+app  = Flask(__name__)
 CORS(app)
 
-YT_DLP_BIN   = os.environ.get("YT_DLP_BIN", "yt-dlp")
+YT_DLP_BIN   = os.environ.get("YT_DLP_BIN",             "yt-dlp")
 MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
 
-# Update yt-dlp once at startup so we always have the latest extractors
-try:
-    subprocess.run([YT_DLP_BIN, "-U"], capture_output=True, timeout=60)
-except Exception:
-    pass  # non-fatal; continue with installed version
+# ── Auto-update yt-dlp in background (non-blocking) ───────────────────────────
+def _update_ytdlp():
+    try:
+        subprocess.run([YT_DLP_BIN, "-U"], capture_output=True, timeout=90)
+        print("[startup] yt-dlp update done", flush=True)
+    except Exception as e:
+        print(f"[startup] yt-dlp update skipped: {e}", flush=True)
 
-# Browser-like headers to pass through to CDN
-DOWNLOAD_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Encoding": "identity",
-    "Connection": "keep-alive",
-}
+threading.Thread(target=_update_ytdlp, daemon=True).start()
 
-# ── yt-dlp helper ──────────────────────────────────────────────────────────────
-def ytdlp(*args, timeout=180, client="android_vr"):
-    """
-    Run yt-dlp with bot-bypass options.
-    client: android_vr bypasses sign-in checks on datacenter IPs for YouTube.
-    Falls back to 'ios' or 'web' if android_vr fails.
-    """
-    cmd = [
+# ── yt-dlp runner ─────────────────────────────────────────────────────────────
+# YouTube client priority:
+#   mweb     — mobile-web, bypasses sign-in/bot checks on most datacenter IPs
+#   tv_embedded — TV embed client, no bot check, works for embeddable videos
+#   ios      — iOS client, no bot check
+#   web      — last resort
+_YT_CLIENTS = ["mweb", "tv_embedded", "ios", "web"]
+
+def _ytdlp_cmd(client: str, *extra_args) -> list:
+    return [
         YT_DLP_BIN,
         "--no-warnings",
         "--geo-bypass",
         "--no-check-certificates",
-        # Force Android VR client — bypasses YouTube's bot/sign-in check
         "--extractor-args", f"youtube:player_client={client}",
-        # Add fake browser headers so CDN/platform accepts the request
-        "--add-headers",
-        "User-Agent:Mozilla/5.0 (Linux; Android 11; Pixel 5) "  
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    ] + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        *extra_args,
+    ]
 
 
-def map_error(stderr):
+def ytdlp_with_fallback(*args, timeout=180):
+    """
+    Run yt-dlp trying multiple YouTube clients until one succeeds.
+    Non-YouTube URLs are also handled (extractor-args is ignored by other extractors).
+    Returns the subprocess.CompletedProcess of the first success, or the last failure.
+    """
+    result = None
+    for client in _YT_CLIENTS:
+        cmd = _ytdlp_cmd(client, *args)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return result
+        stderr_lower = result.stderr.lower()
+        # Only retry on bot/sign-in blocks; fail fast on real errors
+        if not any(kw in stderr_lower for kw in
+                   ["sign in", "bot", "verify", "confirm", "not available",
+                    "player_client", "extractor", "nsig", "player"]):
+            break   # permanent error — no point retrying with another client
+    return result   # return last result (failed)
+
+
+def map_error(stderr: str) -> tuple:
     s = stderr.lower()
-    # True geo restriction
-    if "not available in your country" in s or "geo" in s:
-        return "GEO_RESTRICTED", 403
-    # Truly private/deleted videos
-    if "this video is private" in s or "has been removed" in s:
-        return "PRIVATE_CONTENT", 403
-    # Bot detection — looks like private but it's really a sign-in prompt
-    # Return PARSE_FAILED (retryable) not PRIVATE_CONTENT
-    if "sign in" in s or "confirm your age" in s or "bot" in s or \
-       "verify" in s or "login" in s:
-        return "PARSE_FAILED", 500
-    if "private" in s or "auth" in s:
-        return "PRIVATE_CONTENT", 403
-    if "unsupported url" in s:
-        return "UNSUPPORTED_URL", 400
-    if "rate" in s and "limit" in s:
-        return "RATE_LIMITED", 429
-    return stderr.strip() or "PARSE_FAILED", 500
+    if "not available in your country" in s:            return "GEO_RESTRICTED",    403
+    if "this video is private" in s or "has been removed" in s: return "PRIVATE_CONTENT", 403
+    if "sign in" in s or "bot" in s or "verify" in s:  return "PARSE_FAILED",      500
+    if "private" in s:                                  return "PRIVATE_CONTENT",   403
+    if "unsupported url" in s:                          return "UNSUPPORTED_URL",   400
+    if "rate" in s and "limit" in s:                    return "RATE_LIMITED",      429
+    msg = stderr.strip()[:500] if stderr.strip() else "PARSE_FAILED"
+    return msg,                                                            500
 
 
-# ── /health ────────────────────────────────────────────────────────────────────
+# ── /health ───────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "app": "MediaDrop"})
 
 
-# ── /info ──────────────────────────────────────────────────────────────────────
+# ── /info ─────────────────────────────────────────────────────────────────────
 @app.route("/info")
 def get_info():
-    url = request.args.get("url")
+    url = request.args.get("url", "").strip()
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    # Try with android_vr client first (bypasses YouTube bot check)
-    # Fall back to ios, then web if it fails
-    r = ytdlp("--dump-json", "--no-playlist", url, client="android_vr")
-    if r.returncode != 0:
-        stderr_lower = r.stderr.lower()
-        # If bot-detection or client-specific failure, retry with ios client
-        if any(kw in stderr_lower for kw in ["sign in", "bot", "verify", "confirm",
-                                              "not available", "parse", "extractor"]):
-            r = ytdlp("--dump-json", "--no-playlist", url, client="ios")
-        # Still failing? Try generic web client
-        if r.returncode != 0:
-            r = ytdlp("--dump-json", "--no-playlist", url, client="web")
+    r = ytdlp_with_fallback("--dump-json", "--no-playlist", url)
 
     if r.returncode != 0:
         msg, code = map_error(r.stderr)
@@ -124,17 +107,19 @@ def get_info():
     except json.JSONDecodeError:
         return jsonify({"error": "PARSE_FAILED"}), 500
 
-    duration = data.get("duration", 0) or 0
+    duration = data.get("duration") or 0
     if duration > MAX_DURATION:
         return jsonify({"error": f"Content too long (>{MAX_DURATION}s)"}), 413
 
     formats = []
     for f in data.get("formats", []):
-        vcodec = f.get("vcodec") or "none"
-        acodec = f.get("acodec") or "none"
+        vcodec    = f.get("vcodec") or "none"
+        acodec    = f.get("acodec") or "none"
         has_video = vcodec != "none"
         has_audio = acodec != "none"
-
+        # Skip storyboards and other non-media formats
+        if not has_video and not has_audio:
+            continue
         formats.append({
             "format_id":       f.get("format_id", ""),
             "ext":             f.get("ext", ""),
@@ -151,7 +136,6 @@ def get_info():
             "filesize":        f.get("filesize"),
             "filesize_approx": f.get("filesize_approx"),
             "format_note":     f.get("format_note"),
-            # Note: we do NOT expose the raw CDN url — proxy mode handles delivery
         })
 
     return jsonify({
@@ -160,7 +144,7 @@ def get_info():
         "duration":  duration,
         "extractor": data.get("extractor"),
         "formats":   formats,
-        "error":     None
+        "error":     None,
     })
 
 
@@ -168,76 +152,69 @@ def get_info():
 @app.route("/download")
 def proxy_download():
     """
-    Proxy-streams the video/audio bytes directly to the Android app.
+    Resolves the CDN URL server-side (so IP matches) and proxies the bytes
+    directly to the Android app.  No IP-mismatch → no 403.
 
-    Params:
-      url       – original media page URL
-      format_id – yt-dlp format ID (e.g. "137" for 1080p video)
-      has_audio – "true"/"false"; if false, also fetches & streams best m4a audio
-      stream    – "video" or "audio" (used when has_audio=false, to get each separately)
-
-    The Android app makes two requests when has_audio=false:
-      /download?url=...&format_id=137&has_audio=false&stream=video
-      /download?url=...&format_id=137&has_audio=false&stream=audio
-    Then merges them locally with MediaMuxer.
+    Query params:
+      url        — original media page URL
+      format_id  — yt-dlp format ID
+      has_audio  — "true"/"false"
+      stream     — "video" or "audio" (only relevant when has_audio=false)
     """
-    media_url = request.args.get("url")
-    format_id = request.args.get("format_id")
-    has_audio = request.args.get("has_audio", "true").lower() == "true"
-    stream_type = request.args.get("stream", "video")  # "video" or "audio"
+    media_url   = request.args.get("url", "").strip()
+    format_id   = request.args.get("format_id", "").strip()
+    has_audio   = request.args.get("has_audio", "true").lower() == "true"
+    stream_type = request.args.get("stream", "video")
 
     if not media_url or not format_id:
         return jsonify({"error": "Missing parameters"}), 400
 
-    # Resolve which yt-dlp format to use
+    # Determine format selector
     if has_audio:
         fmt = format_id
+    elif stream_type == "audio":
+        # Prefer AAC/M4A — the only audio codec Android MediaMuxer can handle
+        fmt = "bestaudio[ext=m4a]/bestaudio[acodec=mp4a.40.2]/bestaudio[acodec=aac]/bestaudio"
     else:
-        if stream_type == "audio":
-            # Best m4a audio (AAC) — compatible with Android MediaMuxer
-            fmt = "bestaudio[ext=m4a]/bestaudio[acodec=mp4a.40.2]/bestaudio[acodec=aac]/bestaudio"
-        else:
-            fmt = format_id
+        fmt = format_id
 
-    # Get the direct CDN URL via yt-dlp (on the server, so IP matches)
-    # Use the same android_vr → ios → web fallback chain as /info
-    r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="android_vr")
-    if r.returncode != 0:
-        r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="ios")
-    if r.returncode != 0:
-        r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="web")
-    if r.returncode != 0:
-        return jsonify({"error": r.stderr.strip() or "Failed to resolve URL"}), 500
+    # Resolve CDN URL on the server using the same IP that will fetch it
+    r = ytdlp_with_fallback("--format", fmt, "--get-url", "--no-playlist", media_url)
 
-    lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+    if r.returncode != 0:
+        err = r.stderr.strip()[:300] or "Failed to resolve URL"
+        return jsonify({"error": err}), 500
+
+    lines   = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
     cdn_url = lines[0] if lines else None
 
     if not cdn_url:
         return jsonify({"error": "yt-dlp returned empty URL"}), 500
 
+    # Build request headers — match the headers used by yt-dlp so CDN accepts us
+    req_headers = {
+        "User-Agent":      "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Accept":          "*/*",
+        "Accept-Encoding": "identity",
+        "Connection":      "keep-alive",
+    }
+    # Forward Range header for resume support
+    if "Range" in request.headers:
+        req_headers["Range"] = request.headers["Range"]
 
-    # Forward the Range header from the Android app (for chunked/resume downloads)
-    req_headers = dict(DOWNLOAD_HEADERS)
-    range_header = request.headers.get("Range")
-    if range_header:
-        req_headers["Range"] = range_header
-
-    # Stream from CDN → Flask → Android app
     try:
         cdn_resp = requests.get(
             cdn_url,
             headers=req_headers,
             stream=True,
-            timeout=(15, 120),
+            timeout=(15, 300),  # 5 min max for slow CDNs
             allow_redirects=True,
         )
 
-        # Determine content type
-        content_type = cdn_resp.headers.get("Content-Type", "application/octet-stream")
-
-        # Build response headers to pass back
         resp_headers = {
-            "Content-Type": content_type,
+            "Content-Type":  cdn_resp.headers.get("Content-Type", "application/octet-stream"),
             "Accept-Ranges": "bytes",
         }
         if "Content-Length" in cdn_resp.headers:
@@ -245,11 +222,9 @@ def proxy_download():
         if "Content-Range" in cdn_resp.headers:
             resp_headers["Content-Range"] = cdn_resp.headers["Content-Range"]
 
-        status_code = cdn_resp.status_code  # 200 or 206
-
         def generate():
             try:
-                for chunk in cdn_resp.iter_content(chunk_size=65536):  # 64 KB
+                for chunk in cdn_resp.iter_content(chunk_size=131_072):  # 128 KB
                     if chunk:
                         yield chunk
             finally:
@@ -257,29 +232,28 @@ def proxy_download():
 
         return Response(
             stream_with_context(generate()),
-            status=status_code,
+            status=cdn_resp.status_code,
             headers=resp_headers,
             direct_passthrough=True,
         )
 
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"CDN fetch failed: {str(e)}"}), 502
+        return jsonify({"error": f"CDN fetch error: {str(e)}"}), 502
 
 
 # ── /playlist-info ────────────────────────────────────────────────────────────
 @app.route("/playlist-info")
 def get_playlist_info():
-    """Returns flat playlist entries for batch download."""
-    url = request.args.get("url")
+    url = request.args.get("url", "").strip()
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    r = ytdlp("--dump-json", "--flat-playlist", "--yes-playlist", url, timeout=120)
+    r = ytdlp_with_fallback("--dump-json", "--flat-playlist", "--yes-playlist", url, timeout=120)
     if r.returncode != 0:
         msg, code = map_error(r.stderr)
         return jsonify({"title": "", "entries": [], "error": msg}), code
 
-    entries = []
+    entries        = []
     playlist_title = ""
     playlist_thumb = None
 
@@ -288,36 +262,31 @@ def get_playlist_info():
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-
         if item.get("_type") == "playlist" or "entries" in item:
             playlist_title = item.get("title", "")
             playlist_thumb = item.get("thumbnail")
             for e in item.get("entries", []):
                 if e and e.get("id"):
                     entries.append(_entry(e))
-        else:
-            if item.get("id"):
-                entries.append(_entry(item))
+        elif item.get("id"):
+            entries.append(_entry(item))
 
     if not entries:
-        return jsonify({"error": "No entries found — may not be a playlist"}), 404
-
-    if not playlist_title and entries:
-        playlist_title = f"Playlist ({len(entries)} videos)"
+        return jsonify({"error": "No entries found"}), 404
 
     return jsonify({
-        "title":     playlist_title,
+        "title":     playlist_title or f"Playlist ({len(entries)} videos)",
         "thumbnail": playlist_thumb,
         "entries":   entries,
-        "error":     None
+        "error":     None,
     })
 
 
-def _entry(e):
+def _entry(e: dict) -> dict:
     return {
         "id":        e.get("id", ""),
-        "title":     e.get("title", "") or e.get("ie_key", ""),
-        "url":       e.get("url", "") or e.get("webpage_url", ""),
+        "title":     e.get("title") or e.get("ie_key", ""),
+        "url":       e.get("url") or e.get("webpage_url", ""),
         "duration":  e.get("duration"),
         "thumbnail": e.get("thumbnail") or (e.get("thumbnails") or [{}])[-1].get("url"),
         "uploader":  e.get("uploader") or e.get("channel", ""),

@@ -21,6 +21,7 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
@@ -29,8 +30,8 @@ import kotlin.math.max
 
 @HiltWorker
 class DownloadWorker @AssistedInject constructor(
-    @Assisted private val context : Context,
-    @Assisted private val params  : WorkerParameters,
+    @Assisted private val context: Context,
+    @Assisted private val params: WorkerParameters,
     private val downloadRepository: DownloadRepository,
     private val notificationHelper: NotificationHelper
 ) : CoroutineWorker(context, params) {
@@ -49,14 +50,12 @@ class DownloadWorker @AssistedInject constructor(
         const val KEY_SPEED_BPS   = "SPEED_BPS"
         const val TAG_DOWNLOAD    = "download_worker"
 
-        private const val BUFFER_SIZE       = 65_536   // 64 KB — matched to backend chunk size
-        private const val NOTIF_THROTTLE_MS = 400L
+        private const val BUF_SIZE = 131_072  // 128 KB
     }
 
-    // Shared HTTP client — connects to OUR backend (not CDN directly)
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(600, TimeUnit.SECONDS)   // 10 min for large files
+        .readTimeout(600, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
@@ -73,106 +72,30 @@ class DownloadWorker @AssistedInject constructor(
         val downloadId = inputData.getString(KEY_DOWNLOAD_ID)  ?: return@withContext Result.failure()
         val mediaUrl   = inputData.getString(KEY_MEDIA_URL)    ?: return@withContext Result.failure()
         val formatId   = inputData.getString(KEY_FORMAT_ID)    ?: return@withContext Result.failure()
-        val format     = inputData.getString(KEY_FORMAT)        ?: "mp4"
+        val format     = inputData.getString(KEY_FORMAT)       ?: "mp4"
         val outputPath = inputData.getString(KEY_OUTPUT_PATH)  ?: return@withContext Result.failure()
         val title      = inputData.getString(KEY_TITLE)        ?: "Media"
         val hasAudio   = inputData.getBoolean(KEY_HAS_AUDIO, true)
 
-        android.util.Log.d("DownloadWorker",
-            "Starting: id=$downloadId format=$formatId hasAudio=$hasAudio")
+        android.util.Log.d("DownloadWorker", "Start id=$downloadId fmt=$formatId hasAudio=$hasAudio")
 
         setForeground(notificationHelper.createForegroundInfo(downloadId, title, 0))
         downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.DOWNLOADING)
 
         return@withContext try {
-            val baseUrl = BuildConfig.API_BASE_URL.trimEnd('/')
+            val base       = BuildConfig.API_BASE_URL.trimEnd('/')
+            // URLEncoder encodes the media URL so it is safe as a query parameter
             val encodedUrl = URLEncoder.encode(mediaUrl, "UTF-8")
 
             val success = if (!hasAudio) {
-                // Video-only format: download video stream + audio stream, then mux
-                val tempVideo = File("$outputPath.v.tmp")
-                val tempAudio = File("$outputPath.a.tmp")
-                try {
-                    val videoProxyUrl = "$baseUrl/download?url=$encodedUrl&format_id=$formatId&has_audio=false&stream=video"
-                    val audioProxyUrl = "$baseUrl/download?url=$encodedUrl&format_id=$formatId&has_audio=false&stream=audio"
-
-                    val videoDone = AtomicLong(0)
-                    val audioDone = AtomicLong(0)
-                    val startTime = System.currentTimeMillis()
-
-                    // Progress reporter
-                    val progressJob = launch {
-                        // We don't know total size upfront in proxy mode, show indeterminate
-                        var tick = 0
-                        while (isActive) {
-                            val done = videoDone.get() + audioDone.get()
-                            val progress = (tick % 90).also { tick++ }  // show activity
-                            setProgressAsync(workDataOf(
-                                KEY_PROGRESS  to progress,
-                                KEY_SPEED_BPS to calcSpeed(done, startTime)
-                            ))
-                            notificationHelper.updateProgress(downloadId, title, progress)
-                            delay(500)
-                        }
-                    }
-
-                    val videoJob = async(Dispatchers.IO) {
-                        streamFromProxy(videoProxyUrl, tempVideo, videoDone, downloadId, title)
-                    }
-                    val audioJob = async(Dispatchers.IO) {
-                        streamFromProxy(audioProxyUrl, tempAudio, audioDone, downloadId, title)
-                    }
-
-                    val videoOk = videoJob.await()
-                    val audioOk = audioJob.await()
-                    progressJob.cancel()
-
-                    if (!videoOk || !audioOk) {
-                        android.util.Log.e("DownloadWorker",
-                            "Stream failed: videoOk=$videoOk audioOk=$audioOk")
-                        false
-                    } else {
-                        // Mux
-                        setProgressAsync(workDataOf(KEY_PROGRESS to 92))
-                        notificationHelper.updateProgress(downloadId, title, 92)
-                        val muxOk = muxVideoAudio(tempVideo, tempAudio, File(outputPath))
-                        if (muxOk) {
-                            setProgressAsync(workDataOf(KEY_PROGRESS to 100))
-                        }
-                        muxOk
-                    }
-                } finally {
-                    tempVideo.delete()
-                    tempAudio.delete()
-                }
+                downloadSeparateAndMux(base, encodedUrl, formatId, outputPath, downloadId, title)
             } else {
-                // Single stream (has audio embedded)
-                val proxyUrl = "$baseUrl/download?url=$encodedUrl&format_id=$formatId&has_audio=true&stream=video"
-                val bytesWritten = AtomicLong(0)
-                streamFromProxy(proxyUrl, File(outputPath), bytesWritten, downloadId, title)
+                val proxyUrl = "$base/download?url=$encodedUrl&format_id=$formatId&has_audio=true&stream=video"
+                val total    = AtomicLong(0)
+                streamToFile(proxyUrl, File(outputPath), total, downloadId, title)
             }
 
-            if (success) {
-                val fileSize = FileUtils.getFileSize(outputPath)
-                if (fileSize == 0L) {
-                    android.util.Log.e("DownloadWorker", "File is 0 bytes after download")
-                    downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
-                    notificationHelper.cancelNotification(downloadId)
-                    return@withContext if (runAttemptCount < 2) Result.retry() else Result.failure()
-                }
-                downloadRepository.updateCompletion(downloadId, outputPath, fileSize)
-                FileUtils.scanFile(context, outputPath, FileUtils.guessMime(format))
-                notificationHelper.showCompletionNotification(downloadId, title, fileSize, outputPath, format)
-                setProgressAsync(workDataOf(KEY_PROGRESS to 100))
-                android.util.Log.d("DownloadWorker", "Completed: ${FileUtils.formatFileSize(fileSize)}")
-                Result.success()
-            } else {
-                android.util.Log.e("DownloadWorker", "Download failed, cleaning up")
-                runCatching { File(outputPath).delete() }
-                downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
-                notificationHelper.cancelNotification(downloadId)
-                if (runAttemptCount < 2) Result.retry() else Result.failure()
-            }
+            finalize(success, downloadId, outputPath, title, format)
 
         } catch (e: CancellationException) {
             downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.CANCELLED)
@@ -180,7 +103,7 @@ class DownloadWorker @AssistedInject constructor(
             runCatching { File(outputPath).delete() }
             Result.failure()
         } catch (e: Exception) {
-            android.util.Log.e("DownloadWorker", "Unexpected exception", e)
+            android.util.Log.e("DownloadWorker", "Fatal exception", e)
             runCatching { File(outputPath).delete() }
             downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
             notificationHelper.cancelNotification(downloadId)
@@ -188,64 +111,159 @@ class DownloadWorker @AssistedInject constructor(
         }
     }
 
+    // ─── Download video + audio separately, then mux them ────────────────────
+    private suspend fun downloadSeparateAndMux(
+        base       : String,
+        encodedUrl : String,
+        formatId   : String,
+        outputPath : String,
+        downloadId : String,
+        title      : String
+    ): Boolean {
+        val tempVideo = File("$outputPath.v.tmp")
+        val tempAudio = File("$outputPath.a.tmp")
+        return try {
+            val videoUrl = "$base/download?url=$encodedUrl&format_id=$formatId&has_audio=false&stream=video"
+            val audioUrl = "$base/download?url=$encodedUrl&format_id=$formatId&has_audio=false&stream=audio"
+
+            val vBytes   = AtomicLong(0)
+            val aBytes   = AtomicLong(0)
+            val t0       = System.currentTimeMillis()
+
+            // Animated progress (we don't know total size upfront)
+            val progressJob = CoroutineScope(Dispatchers.IO).launch {
+                var p = 0
+                while (isActive) {
+                    p = (p + 1) % 90
+                    val done = vBytes.get() + aBytes.get()
+                    setProgressAsync(workDataOf(
+                        KEY_PROGRESS  to p,
+                        KEY_SPEED_BPS to speed(done, t0)
+                    ))
+                    notificationHelper.updateProgress(downloadId, title, p)
+                    delay(600)
+                }
+            }
+
+            // Download video and audio concurrently
+            val vJob = CoroutineScope(Dispatchers.IO).async {
+                streamToFile(videoUrl, tempVideo, vBytes, downloadId, title)
+            }
+            val aJob = CoroutineScope(Dispatchers.IO).async {
+                streamToFile(audioUrl, tempAudio, aBytes, downloadId, title)
+            }
+
+            val videoOk = vJob.await()
+            val audioOk = aJob.await()
+            progressJob.cancel()
+
+            android.util.Log.d("DownloadWorker", "videoOk=$videoOk audioOk=$audioOk")
+
+            if (!videoOk || !audioOk) return false
+
+            // Mux phase
+            setProgressAsync(workDataOf(KEY_PROGRESS to 92))
+            notificationHelper.updateProgress(downloadId, title, 92)
+            muxVideoAudio(tempVideo, tempAudio, File(outputPath))
+
+        } finally {
+            tempVideo.delete()
+            tempAudio.delete()
+        }
+    }
+
+    // ─── Core stream-to-file function — THE MAIN BUG WAS HERE ────────────────
     /**
-     * Streams a response body from our backend proxy URL directly to a file.
-     * The backend handles the CDN fetching — no IP mismatch issues.
+     * Downloads bytes from [proxyUrl] and writes them to [outFile].
+     *
+     * CRITICAL FIX: We call body.byteStream() ONCE, store it in a local val,
+     * and call .read() on THAT reference. The previous code called
+     * body.byteStream() twice per loop iteration which creates a new stream
+     * object each time, causing 0-byte output files.
      */
-    private fun streamFromProxy(
+    private fun streamToFile(
         proxyUrl   : String,
         outFile    : File,
         counter    : AtomicLong,
         downloadId : String,
         title      : String
     ): Boolean {
-        android.util.Log.d("DownloadWorker", "Streaming from: ${proxyUrl.take(100)}")
+        android.util.Log.d("DownloadWorker", "streamToFile → ${proxyUrl.take(120)}")
         outFile.parentFile?.mkdirs()
 
         return try {
-            val req = Request.Builder()
-                .url(proxyUrl)
-                .get()
-                .build()
-
+            val req = Request.Builder().url(proxyUrl).get().build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    android.util.Log.e("DownloadWorker",
-                        "Proxy returned HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+                    val body = try { resp.body?.string()?.take(300) } catch (_: Exception) { null }
+                    android.util.Log.e("DownloadWorker", "HTTP ${resp.code}: $body")
                     return false
                 }
 
-                val body = resp.body ?: run {
-                    android.util.Log.e("DownloadWorker", "Null body from proxy")
+                val responseBody = resp.body ?: run {
+                    android.util.Log.e("DownloadWorker", "Null response body")
                     return false
                 }
+
+                // ✅ FIXED: store the stream in ONE variable and read from IT
+                val inputStream: InputStream = responseBody.byteStream()
+                val buf = ByteArray(BUF_SIZE)
 
                 outFile.outputStream().use { out ->
-                    val buf = ByteArray(BUFFER_SIZE)
-                    var n = body.byteStream().read(buf)
+                    var n = inputStream.read(buf)
                     while (n > 0) {
                         out.write(buf, 0, n)
                         counter.addAndGet(n.toLong())
-                        n = body.byteStream().read(buf)
+                        n = inputStream.read(buf)  // ← same inputStream, not byteStream() again
                     }
                 }
-                true
+
+                val written = outFile.length()
+                android.util.Log.d("DownloadWorker", "Written ${FileUtils.formatFileSize(written)} → ${outFile.name}")
+                written > 0
             }
         } catch (e: IOException) {
-            android.util.Log.e("DownloadWorker", "IO error streaming from proxy", e)
+            android.util.Log.e("DownloadWorker", "IO error", e)
             outFile.delete()
             false
         } catch (e: Exception) {
-            android.util.Log.e("DownloadWorker", "Error streaming from proxy", e)
+            android.util.Log.e("DownloadWorker", "Stream error", e)
             outFile.delete()
             false
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MediaMuxer: combine video + audio → final MP4
-    // Supports H.264/H.265 video + AAC/MP4A audio
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─── Finalize download result ────────────────────────────────────────────
+    private suspend fun finalize(
+        success    : Boolean,
+        downloadId : String,
+        outputPath : String,
+        title      : String,
+        format     : String
+    ): Result {
+        return if (success) {
+            val size = FileUtils.getFileSize(outputPath)
+            if (size == 0L) {
+                android.util.Log.e("DownloadWorker", "File is 0 bytes!")
+                downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
+                notificationHelper.cancelNotification(downloadId)
+                return if (runAttemptCount < 2) Result.retry() else Result.failure()
+            }
+            downloadRepository.updateCompletion(downloadId, outputPath, size)
+            FileUtils.scanFile(context, outputPath, FileUtils.guessMime(format))
+            notificationHelper.showCompletionNotification(downloadId, title, size, outputPath, format)
+            setProgressAsync(workDataOf(KEY_PROGRESS to 100))
+            android.util.Log.d("DownloadWorker", "✅ Done: ${FileUtils.formatFileSize(size)}")
+            Result.success()
+        } else {
+            runCatching { File(outputPath).delete() }
+            downloadRepository.updateDownloadStatus(downloadId, DownloadStatus.FAILED)
+            notificationHelper.cancelNotification(downloadId)
+            if (runAttemptCount < 2) Result.retry() else Result.failure()
+        }
+    }
+
+    // ─── MediaMuxer: video + audio → MP4 ────────────────────────────────────
     private fun muxVideoAudio(videoFile: File, audioFile: File, outFile: File): Boolean {
         val videoEx = MediaExtractor()
         val audioEx = MediaExtractor()
@@ -255,41 +273,41 @@ class DownloadWorker @AssistedInject constructor(
             videoEx.setDataSource(videoFile.absolutePath)
             audioEx.setDataSource(audioFile.absolutePath)
 
-            var vidIn = -1; var videoMime = ""
+            var vidIn = -1
+            var audIn = -1
+            var audioMime = ""
+
             for (i in 0 until videoEx.trackCount) {
                 val mime = videoEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
-                if (mime.startsWith("video/")) { vidIn = i; videoMime = mime; break }
+                if (mime.startsWith("video/")) { vidIn = i; break }
             }
-
-            var audIn = -1; var audioMime = ""
             for (i in 0 until audioEx.trackCount) {
                 val mime = audioEx.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
                 if (mime.startsWith("audio/")) { audIn = i; audioMime = mime; break }
             }
 
             if (vidIn < 0) {
-                android.util.Log.e("DownloadWorker", "No video track in ${videoFile.name}")
+                android.util.Log.e("DownloadWorker", "No video track found")
                 return false
             }
 
-            // MediaMuxer can only mux AAC (mp4a) audio, not Opus
+            // MediaMuxer only supports AAC/MP4A — not Opus (WebM)
             val canMuxAudio = audIn >= 0 &&
-                    (audioMime.contains("mp4a") || audioMime.contains("aac") ||
-                     audioMime.contains("3gpp") || audioMime.contains("amr"))
+                    (audioMime.contains("mp4a", true) || audioMime.contains("aac", true) ||
+                     audioMime == "audio/3gpp"        || audioMime == "audio/amr-wb")
 
-            if (!canMuxAudio && audIn >= 0) {
-                android.util.Log.w("DownloadWorker",
-                    "Skipping unmuxable audio codec: $audioMime")
-            }
+            if (!canMuxAudio && audIn >= 0)
+                android.util.Log.w("DownloadWorker", "Skipping incompatible audio: $audioMime")
 
             muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val vidOut = muxer.addTrack(videoEx.getTrackFormat(vidIn))
             val audOut = if (canMuxAudio) muxer.addTrack(audioEx.getTrackFormat(audIn)) else -1
-
             muxer.start()
+
             val buf  = ByteBuffer.allocate(2 * 1024 * 1024)
             val info = MediaCodec.BufferInfo()
 
+            // Write video samples
             videoEx.selectTrack(vidIn)
             videoEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
             while (true) {
@@ -302,6 +320,7 @@ class DownloadWorker @AssistedInject constructor(
                 videoEx.advance()
             }
 
+            // Write audio samples
             if (canMuxAudio) {
                 audioEx.selectTrack(audIn)
                 audioEx.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
@@ -317,9 +336,9 @@ class DownloadWorker @AssistedInject constructor(
             }
 
             muxer.stop()
-            android.util.Log.d("DownloadWorker",
-                "Mux complete: ${outFile.name} (${FileUtils.formatFileSize(outFile.length())})")
+            android.util.Log.d("DownloadWorker", "Mux ✅ ${outFile.length()} bytes")
             true
+
         } catch (e: Exception) {
             android.util.Log.e("DownloadWorker", "Mux failed", e)
             outFile.delete()
@@ -331,7 +350,7 @@ class DownloadWorker @AssistedInject constructor(
         }
     }
 
-    private fun calcSpeed(bytes: Long, startMs: Long): Long {
+    private fun speed(bytes: Long, startMs: Long): Long {
         val elapsed = max(1L, System.currentTimeMillis() - startMs)
         return (bytes * 1000L) / elapsed
     }
