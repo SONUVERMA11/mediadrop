@@ -7,7 +7,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# Opt into Node.js 24 to silence deprecation warnings
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -17,11 +16,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Java 17 ───────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -29,32 +26,22 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      # ── 3. Android SDK ────────────────────────────────────────────────────────
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ── 4. Setup Gradle ───────────────────────────────────────────────────────
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.6"
-          cache-read-only: false
 
-      # ── 5. Create local.properties ───────────────────────────────────────────
       - name: Create local.properties
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "API_BASE_URL=${{ secrets.API_BASE_URL || 'https://placeholder.railway.app/' }}" >> local.properties
-          echo "local.properties created:"
-          cat local.properties
 
-      # ── 6. Build Debug APK ───────────────────────────────────────────────────
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
-        env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -Dkotlin.incremental=false
 
-      # ── 7. Upload APK artifact ───────────────────────────────────────────────
       - name: Upload Debug APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -63,18 +50,12 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      # ── 8. APK summary ────────────────────────────────────────────────────────
       - name: APK Info
         if: success()
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          if [ -f "$APK" ]; then
-            SIZE=$(du -h "$APK" | cut -f1)
-            echo "✅ APK built successfully! Size: $SIZE"
-            echo "APK_SIZE=$SIZE" >> $GITHUB_OUTPUT
-          fi
+          [ -f "$APK" ] && echo "✅ APK: $(du -h $APK | cut -f1)"
 
-  # ── Release build (runs only on version tags) ──────────────────────────────
   release:
     name: Build Release APK
     runs-on: ubuntu-latest
@@ -106,8 +87,6 @@ jobs:
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
-        env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -123,7 +102,4 @@ jobs:
           name: MediaDrop ${{ github.ref_name }}
           body: |
             ## MediaDrop ${{ github.ref_name }}
-
             Universal Video & Media Downloader (Android 7+)
-
-            > ⚠️ Unsigned build — sideload via ADB or use Android Studio for signed installation.
