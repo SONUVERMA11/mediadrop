@@ -7,13 +7,13 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     name: Build Debug APK
     runs-on: ubuntu-latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout repository
@@ -24,23 +24,26 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.6"
+          cache-read-only: false
 
       - name: Create local.properties
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "API_BASE_URL=${{ secrets.API_BASE_URL || 'https://placeholder.railway.app/' }}" >> local.properties
+          cat local.properties
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: gradle assembleDebug --stacktrace --no-daemon
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g -Dkotlin.incremental=false"
 
       - name: Upload Debug APK
         if: success()
@@ -54,7 +57,10 @@ jobs:
         if: success()
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          [ -f "$APK" ] && echo "✅ APK: $(du -h $APK | cut -f1)"
+          if [ -f "$APK" ]; then
+            SIZE=$(du -h "$APK" | cut -f1)
+            echo "✅ APK built successfully! Size: $SIZE"
+          fi
 
   release:
     name: Build Release APK
@@ -70,13 +76,12 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.6"
 
@@ -86,7 +91,9 @@ jobs:
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> local.properties
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -96,10 +103,13 @@ jobs:
           retention-days: 90
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v1
         with:
           files: app/build/outputs/apk/release/app-release-unsigned.apk
           name: MediaDrop ${{ github.ref_name }}
           body: |
             ## MediaDrop ${{ github.ref_name }}
+
             Universal Video & Media Downloader (Android 7+)
+
+            > ⚠️ Unsigned build — sideload via ADB or use Android Studio for signed installation.
