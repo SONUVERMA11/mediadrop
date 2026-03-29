@@ -28,6 +28,12 @@ CORS(app)
 YT_DLP_BIN   = os.environ.get("YT_DLP_BIN", "yt-dlp")
 MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
 
+# Update yt-dlp once at startup so we always have the latest extractors
+try:
+    subprocess.run([YT_DLP_BIN, "-U"], capture_output=True, timeout=60)
+except Exception:
+    pass  # non-fatal; continue with installed version
+
 # Browser-like headers to pass through to CDN
 DOWNLOAD_HEADERS = {
     "User-Agent": (
@@ -40,22 +46,46 @@ DOWNLOAD_HEADERS = {
 }
 
 # ── yt-dlp helper ──────────────────────────────────────────────────────────────
-def ytdlp(*args, timeout=180):
+def ytdlp(*args, timeout=180, client="android_vr"):
+    """
+    Run yt-dlp with bot-bypass options.
+    client: android_vr bypasses sign-in checks on datacenter IPs for YouTube.
+    Falls back to 'ios' or 'web' if android_vr fails.
+    """
     cmd = [
         YT_DLP_BIN,
         "--no-warnings",
         "--geo-bypass",
         "--no-check-certificates",
+        # Force Android VR client — bypasses YouTube's bot/sign-in check
+        "--extractor-args", f"youtube:player_client={client}",
+        # Add fake browser headers so CDN/platform accepts the request
+        "--add-headers",
+        "User-Agent:Mozilla/5.0 (Linux; Android 11; Pixel 5) "  
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     ] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def map_error(stderr):
     s = stderr.lower()
-    if "not available in your country" in s: return "GEO_RESTRICTED", 403
-    if "private video" in s or "this video is private" in s: return "PRIVATE_CONTENT", 403
-    if "unsupported url" in s: return "UNSUPPORTED_URL", 400
-    if "rate" in s and "limit" in s: return "RATE_LIMITED", 429
+    # True geo restriction
+    if "not available in your country" in s or "geo" in s:
+        return "GEO_RESTRICTED", 403
+    # Truly private/deleted videos
+    if "this video is private" in s or "has been removed" in s:
+        return "PRIVATE_CONTENT", 403
+    # Bot detection — looks like private but it's really a sign-in prompt
+    # Return PARSE_FAILED (retryable) not PRIVATE_CONTENT
+    if "sign in" in s or "confirm your age" in s or "bot" in s or \
+       "verify" in s or "login" in s:
+        return "PARSE_FAILED", 500
+    if "private" in s or "auth" in s:
+        return "PRIVATE_CONTENT", 403
+    if "unsupported url" in s:
+        return "UNSUPPORTED_URL", 400
+    if "rate" in s and "limit" in s:
+        return "RATE_LIMITED", 429
     return stderr.strip() or "PARSE_FAILED", 500
 
 
@@ -72,7 +102,19 @@ def get_info():
     if not url:
         return jsonify({"error": "Missing url"}), 400
 
-    r = ytdlp("--dump-json", "--no-playlist", url)
+    # Try with android_vr client first (bypasses YouTube bot check)
+    # Fall back to ios, then web if it fails
+    r = ytdlp("--dump-json", "--no-playlist", url, client="android_vr")
+    if r.returncode != 0:
+        stderr_lower = r.stderr.lower()
+        # If bot-detection or client-specific failure, retry with ios client
+        if any(kw in stderr_lower for kw in ["sign in", "bot", "verify", "confirm",
+                                              "not available", "parse", "extractor"]):
+            r = ytdlp("--dump-json", "--no-playlist", url, client="ios")
+        # Still failing? Try generic web client
+        if r.returncode != 0:
+            r = ytdlp("--dump-json", "--no-playlist", url, client="web")
+
     if r.returncode != 0:
         msg, code = map_error(r.stderr)
         return jsonify({"title": "", "formats": [], "error": msg}), code
@@ -158,7 +200,12 @@ def proxy_download():
             fmt = format_id
 
     # Get the direct CDN URL via yt-dlp (on the server, so IP matches)
-    r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url)
+    # Use the same android_vr → ios → web fallback chain as /info
+    r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="android_vr")
+    if r.returncode != 0:
+        r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="ios")
+    if r.returncode != 0:
+        r = ytdlp("--format", fmt, "--get-url", "--no-playlist", media_url, client="web")
     if r.returncode != 0:
         return jsonify({"error": r.stderr.strip() or "Failed to resolve URL"}), 500
 
@@ -167,6 +214,7 @@ def proxy_download():
 
     if not cdn_url:
         return jsonify({"error": "yt-dlp returned empty URL"}), 500
+
 
     # Forward the Range header from the Android app (for chunked/resume downloads)
     req_headers = dict(DOWNLOAD_HEADERS)
