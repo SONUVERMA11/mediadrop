@@ -116,8 +116,17 @@ jobs:
             echo "Release signing secrets not configured; release APK will remain unsigned."
           fi
 
-      - name: Build Release APK
-        run: gradle assembleRelease --no-daemon
+      - name: Build Release Asset
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_PATH:-}" ]; then
+            gradle assembleRelease --no-daemon
+            echo "APK_SOURCE=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+            echo "APK_KIND=signed release" >> "$GITHUB_ENV"
+          else
+            gradle assembleDebug --no-daemon
+            echo "APK_SOURCE=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+            echo "APK_KIND=installable debug" >> "$GITHUB_ENV"
+          fi
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
 
@@ -125,11 +134,7 @@ jobs:
         if: success()
         run: |
           mkdir -p dist
-          APK="app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$APK" ]; then
-            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-          fi
-          cp "$APK" "dist/DeepLoader-${{ github.ref_name }}.apk"
+          cp "$APK_SOURCE" "dist/DeepLoader-${{ github.ref_name }}.apk"
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -148,5 +153,5 @@ jobs:
 
             Universal Video & Media Downloader (Android 7+)
 
-            Debug workflow artifacts are installable immediately.
-            Tagged release builds are signed only when Android keystore secrets are configured.
+            This release contains a ${{ env.APK_KIND }} APK.
+            When Android signing secrets are configured, tagged builds publish a signed release APK.
