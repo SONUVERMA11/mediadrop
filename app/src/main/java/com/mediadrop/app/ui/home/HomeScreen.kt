@@ -129,10 +129,10 @@ fun HomeScreen(
             ) {
                 // Logo
                 Text(
-                    text  = "DC",
+                    text  = "DeepLoader",
                     style = MaterialTheme.typography.displaySmall.copy(
                         fontWeight = FontWeight.Black,
-                        fontSize   = 56.sp,
+                        fontSize   = 42.sp,
                         brush      = Brush.linearGradient(listOf(Gold400, Gold600))
                     )
                 )

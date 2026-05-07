@@ -12,6 +12,21 @@ val localProperties = Properties().apply {
     if (file.exists()) load(file.inputStream())
 }
 
+fun localOrEnv(name: String): String? =
+    System.getenv(name)?.takeIf { it.isNotBlank() }
+        ?: localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+
+val releaseKeystorePath     = localOrEnv("ANDROID_KEYSTORE_PATH")
+val releaseKeystorePassword = localOrEnv("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias         = localOrEnv("ANDROID_KEY_ALIAS")
+val releaseKeyPassword      = localOrEnv("ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.mediadrop.app"
     compileSdk = 34
@@ -46,9 +61,25 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = file(requireNotNull(releaseKeystorePath))
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

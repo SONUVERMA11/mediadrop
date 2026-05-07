@@ -20,10 +20,10 @@ enum class ThemeMode(val displayName: String) {
 
 // ── Save-location options ─────────────────────────────────────────────────────
 enum class SaveLocation(val displayName: String, val hint: String) {
-    SMART    ("Smart (auto)",    "Videos → Movies, Audio → Music"),
-    DOWNLOADS("Downloads/DC/",   "Everything in public Downloads"),
-    MOVIES   ("Movies/DC/",      "All files in public Movies folder"),
-    MUSIC    ("Music/DC/",       "All files in public Music folder"),
+    SMART    ("Smart (auto)",            "Videos -> Movies, Audio -> Music"),
+    DOWNLOADS("Downloads/DeepLoader/",   "Everything in public Downloads"),
+    MOVIES   ("Movies/DeepLoader/",      "All files in public Movies folder"),
+    MUSIC    ("Music/DeepLoader/",       "All files in public Music folder"),
 }
 
 data class AppSettings(

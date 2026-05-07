@@ -52,7 +52,7 @@ class NotificationHelper @Inject constructor(
     fun createForegroundInfo(downloadId: String, title: String, progress: Int): ForegroundInfo {
         val id = notifId(downloadId)
         val notification = NotificationCompat.Builder(context, CHANNEL_DOWNLOAD)
-            .setContentTitle("MediaDrop – Downloading")
+            .setContentTitle("DeepLoader - Downloading")
             .setContentText(title)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setProgress(100, progress, progress == 0)
@@ -69,7 +69,7 @@ class NotificationHelper @Inject constructor(
             if (eta.isNotEmpty()) append(" · $eta remaining")
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_DOWNLOAD)
-            .setContentTitle("MediaDrop – Downloading")
+            .setContentTitle("DeepLoader - Downloading")
             .setContentText(title)
             .setSubText(subText.ifEmpty { null })
             .setSmallIcon(android.R.drawable.stat_sys_download)

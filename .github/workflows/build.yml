@@ -1,4 +1,7 @@
-name: Build MediaDrop APK
+name: Build DeepLoader APK
+
+permissions:
+  contents: write
 
 on:
   push:
@@ -9,7 +12,7 @@ on:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build Installable Debug APK
     runs-on: ubuntu-latest
 
     env:
@@ -45,18 +48,24 @@ jobs:
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g -Dkotlin.incremental=false"
 
+      - name: Prepare Debug Artifact
+        if: success()
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/DeepLoader-debug.apk
+
       - name: Upload Debug APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: MediaDrop-debug-${{ github.run_number }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: DeepLoader-debug-${{ github.run_number }}
+          path: dist/DeepLoader-debug.apk
           retention-days: 30
 
       - name: APK Info
         if: success()
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APK="dist/DeepLoader-debug.apk"
           if [ -f "$APK" ]; then
             SIZE=$(du -h "$APK" | cut -f1)
             echo "✅ APK built successfully! Size: $SIZE"
@@ -90,26 +99,46 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> local.properties
 
+      - name: Decode Release Keystore
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
       - name: Build Release APK
         run: gradle assembleRelease --no-daemon
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g"
 
+      - name: Prepare Release Artifact
+        if: success()
+        run: |
+          mkdir -p dist
+          APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          fi
+          cp "$APK" "dist/DeepLoader-${{ github.ref_name }}.apk"
+
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: MediaDrop-release-${{ github.ref_name }}
-          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          name: DeepLoader-release-${{ github.ref_name }}
+          path: dist/DeepLoader-${{ github.ref_name }}.apk
           retention-days: 90
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/app-release-unsigned.apk
-          name: MediaDrop ${{ github.ref_name }}
+          files: dist/DeepLoader-${{ github.ref_name }}.apk
+          name: DeepLoader ${{ github.ref_name }}
           body: |
-            ## MediaDrop ${{ github.ref_name }}
+            ## DeepLoader ${{ github.ref_name }}
 
             Universal Video & Media Downloader (Android 7+)
 
-            > ⚠️ Unsigned build — sideload via ADB or use Android Studio for signed installation.
+            Debug workflow artifacts are installable immediately.
+            Tagged release builds are signed only when Android keystore secrets are configured.

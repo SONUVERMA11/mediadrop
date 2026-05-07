@@ -46,7 +46,7 @@
             Share Receiver — appears in the share sheet of YouTube, Instagram, TikTok, etc.
             CRITICAL:
             • android:exported="true" makes it visible to other apps
-            • android:label="DC" is what shows in the share sheet
+            • android:label points at the visible app name in the share sheet
             • theme must be a valid theme (use the main app theme)
             • DEFAULT category is required for share targets
             • text/plain is what YouTube / most apps send when sharing a URL
@@ -54,7 +54,7 @@
         <activity
             android:name=".ui.ShareReceiverActivity"
             android:exported="true"
-            android:label="DC"
+            android:label="@string/app_name"
             android:icon="@mipmap/ic_launcher"
             android:theme="@style/Theme.MediaDrop"
             android:launchMode="singleTask">

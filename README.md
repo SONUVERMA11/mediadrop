@@ -1,6 +1,8 @@
-# MediaDrop – Universal Video & Media Downloader
+# DeepLoader – Universal Video & Media Downloader
 
 A production-ready Android application for downloading videos, audio, and media from YouTube, Instagram, TikTok, Reddit, Vimeo, Twitter/X, Facebook, SoundCloud, Twitch, Pinterest, Dailymotion, and LinkedIn.
+
+Note: the user-facing product name is now `DeepLoader`. The current Android package and some internal class names still use `com.mediadrop.app` to avoid an unnecessary package/db migration.
 
 ---
 
@@ -147,8 +149,15 @@ cd backend
 
 Set environment variables in Railway:
 - `MAX_DURATION_SECONDS=7200` (optional)
+- `YTDLP_COOKIES_FILE=/app/cookies.txt` (optional, helps with YouTube anti-bot/login checks)
+- `YTDLP_COOKIES_BROWSER=chrome` (optional alternative to a cookie file)
+- `YTDLP_COOKIES_PROFILE=Default` (optional browser profile for `YTDLP_COOKIES_BROWSER`)
+- `YTDLP_YOUTUBE_PO_TOKEN=mweb.gvs+...` (optional, for YouTube PO-token-protected requests)
+- `YTDLP_YOUTUBE_VISITOR_DATA=...` (optional, pairs with the same session/PO token when needed)
 
 After deploy, copy the URL to `local.properties` as `API_BASE_URL`.
+
+The `/health` endpoint now also reports whether cookie/PO-token based YouTube auth is configured, without exposing the secret values.
 
 #### Option B – Local development (with ngrok)
 
@@ -167,6 +176,19 @@ ngrok http 8080
 ./gradlew assembleDebug
 # Or Run from Android Studio
 ```
+
+### 5. Cloud APK Build with GitHub Actions
+
+This repo includes a GitHub Actions workflow at `.github/workflows/build.yml`.
+
+- Push to `main`, `master`, or `develop`, or run the workflow manually from the Actions tab.
+- Download the installable debug APK artifact named `DeepLoader-debug-<run_number>`.
+- To generate a signed release APK on tags like `v1.0.0`, add these GitHub secrets:
+- `API_BASE_URL`
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
 
 ---
 
@@ -207,7 +229,7 @@ StartDownloadUseCase
 WorkManager.enqueueUniqueWork(DownloadWorker)
       │
 DownloadWorker.doWork()
-  ├── GET /download-url → direct CDN URL
+  ├── GET /download → direct CDN URL proxy
   ├── OkHttp stream download with progress
   ├── setProgressAsync() → UI progress bar
   ├── NotificationHelper.updateProgress()

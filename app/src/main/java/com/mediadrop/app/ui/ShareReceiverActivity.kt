@@ -159,7 +159,7 @@ private fun ShareLoadingCard(url: String, onDismiss: () -> Unit) {
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                "DC Downloader",
+                                "DeepLoader",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )

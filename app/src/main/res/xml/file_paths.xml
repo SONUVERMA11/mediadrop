@@ -11,13 +11,13 @@
     <!--  Public shared storage  -->
     <external-path
         name="public_downloads"
-        path="Download/DC/" />
+        path="Download/DeepLoader/" />
     <external-path
         name="public_movies"
-        path="Movies/DC/" />
+        path="Movies/DeepLoader/" />
     <external-path
         name="public_music"
-        path="Music/DC/" />
+        path="Music/DeepLoader/" />
 
     <!--  Entire public external (broad fallback for open/share)  -->
     <external-path

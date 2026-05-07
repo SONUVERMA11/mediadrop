@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "MediaDrop"
+rootProject.name = "DeepLoader"
 include(":app")

@@ -2,7 +2,7 @@
 # Gradle startup script for UNIX
 #
 # Add default JVM options here, overriding JAVA_OPTS
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+DEFAULT_JVM_OPTS='-Xmx64m -Xms64m'
 
 APP_NAME="Gradle"
 APP_BASE_NAME=$(basename "$0")

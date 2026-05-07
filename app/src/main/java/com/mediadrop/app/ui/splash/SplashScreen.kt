@@ -77,9 +77,9 @@ fun SplashScreen(onFinished: () -> Unit) {
         ) {
             // Logo letters
             Text(
-                text = "DC",
+                text = "DeepLoader",
                 style = MaterialTheme.typography.displayLarge.copy(
-                    fontSize = 96.sp,
+                    fontSize = 56.sp,
                     fontWeight = FontWeight.Black,
                     brush = Brush.linearGradient(listOf(Gold400, Gold600))
                 ),

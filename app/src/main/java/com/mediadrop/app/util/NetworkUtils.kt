@@ -27,6 +27,7 @@ sealed class MediaError(message: String) : Exception(message) {
     object UnsupportedUrl : MediaError("Unsupported URL")
     object GeoRestricted : MediaError("Geo-restricted content")
     object PrivateContent : MediaError("Private content")
+    object YouTubeAuthRequired : MediaError("YouTube auth required")
     object RateLimited : MediaError("Rate limited")
     object ParseFailed : MediaError("Parse failed")
     object StorageFull : MediaError("Storage full")
@@ -38,6 +39,7 @@ sealed class MediaError(message: String) : Exception(message) {
         is UnsupportedUrl -> "This link is not supported yet."
         is GeoRestricted -> "This content is not available in your region."
         is PrivateContent -> "This content is private or login-protected."
+        is YouTubeAuthRequired -> "YouTube blocked this request. Refresh the backend yt-dlp setup and add cookies or a PO token if needed."
         is RateLimited -> "Too many requests. Please wait a moment."
         is ParseFailed -> "Could not extract media info. Try again."
         is StorageFull -> "Not enough storage space."
@@ -57,6 +59,11 @@ fun Throwable.toMediaError(): MediaError {
         // Geo restricted
         msg.contains("geo") || msg.contains("region") ||
         msg.contains("country") || msg.contains("geo_restricted")        -> MediaError.GeoRestricted
+
+        // YouTube anti-bot / auth requirements
+        msg.contains("youtube_auth_required") || msg.contains("po token") ||
+        msg.contains("confirm you're not a bot") || msg.contains("confirm you’re not a bot") ||
+        msg.contains("serviceintegrity")                                   -> MediaError.YouTubeAuthRequired
 
         // Private / login required
         msg.contains("private") || msg.contains("login") ||
@@ -83,4 +90,3 @@ fun Throwable.toMediaError(): MediaError {
         else -> MediaError.Unknown(originalCause = this)
     }
 }
-

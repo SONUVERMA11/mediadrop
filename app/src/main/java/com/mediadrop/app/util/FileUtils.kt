@@ -8,6 +8,7 @@ import java.io.File
 
 object FileUtils {
 
+    private const val OUTPUT_DIR_NAME = "DeepLoader"
     private val AUDIO_FORMATS = setOf("mp3","m4a","aac","opus","flac","wav","ogg")
     private val VIDEO_FORMATS = setOf("mp4","mkv","webm","avi","mov","m4v","3gp")
 
@@ -49,24 +50,24 @@ object FileUtils {
                 when (format.lowercase()) {
                     in AUDIO_FORMATS ->
                         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-                            .resolve("DC")
+                            .resolve(OUTPUT_DIR_NAME)
                     in VIDEO_FORMATS ->
                         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-                            .resolve("DC")
+                            .resolve(OUTPUT_DIR_NAME)
                     else ->
                         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                            .resolve("DC")
+                            .resolve(OUTPUT_DIR_NAME)
                 }
             }
             SaveLocation.DOWNLOADS ->
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                    .resolve("DC")
+                    .resolve(OUTPUT_DIR_NAME)
             SaveLocation.MOVIES ->
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-                    .resolve("DC")
+                    .resolve(OUTPUT_DIR_NAME)
             SaveLocation.MUSIC ->
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-                    .resolve("DC")
+                    .resolve(OUTPUT_DIR_NAME)
         }
 
         val dir = if (publicDir.exists() || publicDir.mkdirs()) {

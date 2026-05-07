@@ -182,7 +182,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text     = "DC v1.0 • Made with ❤️ by SONU VERMA",
+            text     = "DeepLoader v1.0 • Made with ❤️ by SONU VERMA",
             style    = MaterialTheme.typography.labelSmall,
             color    = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)

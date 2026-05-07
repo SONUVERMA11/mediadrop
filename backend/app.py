@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MediaDrop Backend — Proxy-download mode using yt-dlp Python API.
+DeepLoader Backend — Proxy-download mode using yt-dlp Python API.
   GET /health          — liveness probe
   GET /info            — media metadata + format list
   GET /download        — proxies media bytes to the client
@@ -8,10 +8,8 @@ MediaDrop Backend — Proxy-download mode using yt-dlp Python API.
 """
 
 import os
-import json
 import threading
-import traceback
-import subprocess
+from urllib.parse import urlparse
 
 import requests
 import yt_dlp
@@ -22,6 +20,22 @@ app  = Flask(__name__)
 CORS(app)
 
 MAX_DURATION = int(os.environ.get("MAX_DURATION_SECONDS", 7200))
+YTDLP_COOKIE_FILE = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or None
+YTDLP_COOKIES_BROWSER = os.environ.get("YTDLP_COOKIES_BROWSER", "").strip() or None
+YTDLP_COOKIES_PROFILE = os.environ.get("YTDLP_COOKIES_PROFILE", "").strip() or None
+YTDLP_COOKIES_KEYRING = os.environ.get("YTDLP_COOKIES_KEYRING", "").strip() or None
+YTDLP_COOKIES_CONTAINER = os.environ.get("YTDLP_COOKIES_CONTAINER", "").strip() or None
+YTDLP_YOUTUBE_PO_TOKEN = os.environ.get("YTDLP_YOUTUBE_PO_TOKEN", "").strip() or None
+YTDLP_YOUTUBE_VISITOR_DATA = os.environ.get("YTDLP_YOUTUBE_VISITOR_DATA", "").strip() or None
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip() or None
+YTDLP_USER_AGENT = os.environ.get(
+    "YTDLP_USER_AGENT",
+    (
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Mobile Safari/537.36"
+    ),
+).strip()
 
 # ── Auto-update yt-dlp once in background ────────────────────────────────────
 def _update():
@@ -35,25 +49,116 @@ def _update():
 threading.Thread(target=_update, daemon=True).start()
 
 # ── yt-dlp base options ───────────────────────────────────────────────────────
-# These are tried in order for YouTube until one works.
-# For non-YouTube URLs, extractor_args is ignored.
-_YT_CLIENTS = ["mweb", "tv_embedded", "ios", "android", "web"]
+# Let yt-dlp's default YouTube client selection run first, then fall back to
+# a curated list of supported clients if extraction still fails.
+_YT_CLIENTS = [None, "tv", "android_vr", "ios", "android", "mweb", "web_safari", "web"]
 
-def _base_opts(client: str = "mweb") -> dict:
-    return {
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return (
+        host.endswith("youtube.com")
+        or host.endswith("youtu.be")
+        or host.endswith("youtube-nocookie.com")
+    )
+
+
+def _has_cookie_auth() -> bool:
+    return bool(YTDLP_COOKIE_FILE or YTDLP_COOKIES_BROWSER)
+
+
+def _cookies_from_browser_spec():
+    if not YTDLP_COOKIES_BROWSER:
+        return None
+
+    spec = [
+        YTDLP_COOKIES_BROWSER,
+        YTDLP_COOKIES_PROFILE,
+        YTDLP_COOKIES_KEYRING,
+        YTDLP_COOKIES_CONTAINER,
+    ]
+    while len(spec) > 1 and spec[-1] is None:
+        spec.pop()
+    return tuple(spec)
+
+
+def _youtube_extractor_args(client: str | None) -> dict:
+    args = {}
+    if client:
+        args["player_client"] = [client]
+    if YTDLP_YOUTUBE_PO_TOKEN:
+        args["po_token"] = [YTDLP_YOUTUBE_PO_TOKEN]
+    if YTDLP_YOUTUBE_VISITOR_DATA:
+        args["visitor_data"] = [YTDLP_YOUTUBE_VISITOR_DATA]
+        if not _has_cookie_auth():
+            args["player_skip"] = ["webpage", "configs"]
+    return args
+
+
+def _base_opts(client: str | None = None) -> dict:
+    opts = {
         "quiet":              True,
         "no_warnings":        True,
         "geo_bypass":         True,
         "nocheckcertificate": True,
-        "extractor_args":     {"youtube": {"player_client": [client]}},
+        "extractor_retries":  3,
+        "retries":            3,
+        "fragment_retries":   3,
+        "socket_timeout":     30,
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            ),
+            "User-Agent": YTDLP_USER_AGENT,
         },
     }
+
+    if YTDLP_PROXY:
+        opts["proxy"] = YTDLP_PROXY
+    if YTDLP_COOKIE_FILE:
+        opts["cookiefile"] = YTDLP_COOKIE_FILE
+    else:
+        browser_spec = _cookies_from_browser_spec()
+        if browser_spec:
+            opts["cookiesfrombrowser"] = browser_spec
+
+    youtube_args = _youtube_extractor_args(client)
+    if youtube_args:
+        extractor_args = {"youtube": youtube_args}
+        if YTDLP_YOUTUBE_VISITOR_DATA and not _has_cookie_auth():
+            extractor_args["youtubetab"] = {"skip": ["webpage"]}
+        opts["extractor_args"] = extractor_args
+
+    return opts
+
+
+def _should_retry_youtube_client(msg: str) -> bool:
+    if any(kw in msg for kw in (
+        "unsupported url",
+        "private video",
+        "this video is private",
+        "has been removed",
+        "not available in your country",
+        "geo restricted",
+    )):
+        return False
+
+    return any(kw in msg for kw in (
+        "sign in",
+        "bot",
+        "verify",
+        "confirm",
+        "nsig",
+        "player",
+        "extractor",
+        "po token",
+        "serviceintegrity",
+        "visitor_data",
+        "forbidden",
+        "http error 403",
+        "requested format is not available",
+        "unsupported player client",
+    ))
 
 
 def extract_info_with_fallback(url: str, extra_opts: dict = None) -> dict:
@@ -61,28 +166,30 @@ def extract_info_with_fallback(url: str, extra_opts: dict = None) -> dict:
     Try extracting info with multiple YouTube clients.
     Returns the info dict on success, raises on failure.
     """
+    is_youtube = _is_youtube_url(url)
+    clients = _YT_CLIENTS if is_youtube else [None]
     last_error = None
-    for client in _YT_CLIENTS:
-        opts = {**_base_opts(client), **(extra_opts or {})}
+    for client in clients:
+        label = client or "default"
+        opts = {**_base_opts(client if is_youtube else None), **(extra_opts or {})}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if info:
-                    print(f"[info] client={client} ok url={url[:60]}", flush=True)
+                    print(f"[info] client={label} ok url={url[:60]}", flush=True)
                     return ydl.sanitize_info(info)
         except yt_dlp.utils.DownloadError as e:
             msg = str(e).lower()
             last_error = e
-            print(f"[info] client={client} failed: {str(e)[:120]}", flush=True)
-            # Only retry bot-detection. Fail fast on real errors.
-            if not any(kw in msg for kw in
-                       ["sign in", "bot", "verify", "confirm", "nsig",
-                        "player", "extractor", "not available"]):
+            print(f"[info] client={label} failed: {str(e)[:120]}", flush=True)
+            if not is_youtube or not _should_retry_youtube_client(msg):
                 break
         except Exception as e:
             last_error = e
-            print(f"[info] client={client} exception: {e}", flush=True)
-            break
+            msg = str(e).lower()
+            print(f"[info] client={label} exception: {e}", flush=True)
+            if not is_youtube or not _should_retry_youtube_client(msg):
+                break
 
     raise last_error or Exception("All clients failed")
 
@@ -96,8 +203,15 @@ def classify_error(e: Exception) -> tuple:
         return "PRIVATE_CONTENT", 403
     if "private" in msg:
         return "PRIVATE_CONTENT", 403
-    if "sign in" in msg or "bot" in msg or "verify" in msg or "confirm" in msg:
-        return "PARSE_FAILED", 500
+    if (
+        "sign in" in msg
+        or "bot" in msg
+        or "verify" in msg
+        or "confirm" in msg
+        or "po token" in msg
+        or "serviceintegrity" in msg
+    ):
+        return "YOUTUBE_AUTH_REQUIRED", 403
     if "unsupported url" in msg:
         return "UNSUPPORTED_URL", 400
     if "rate" in msg and "limit" in msg:
@@ -113,7 +227,16 @@ def classify_error(e: Exception) -> tuple:
 # ── /health ───────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "ytdlp": yt_dlp.version.__version__})
+    return jsonify({
+        "status": "ok",
+        "ytdlp": yt_dlp.version.__version__,
+        "youtube_auth": {
+            "cookie_file": bool(YTDLP_COOKIE_FILE),
+            "cookies_from_browser": bool(YTDLP_COOKIES_BROWSER),
+            "po_token": bool(YTDLP_YOUTUBE_PO_TOKEN),
+            "visitor_data": bool(YTDLP_YOUTUBE_VISITOR_DATA),
+        },
+    })
 
 
 # ── /info ─────────────────────────────────────────────────────────────────────
@@ -209,9 +332,11 @@ def proxy_download():
     # Get CDN URL using the Python API
     cdn_url = None
     last_err = None
-    for client in _YT_CLIENTS:
+    is_youtube = _is_youtube_url(media_url)
+    for client in (_YT_CLIENTS if is_youtube else [None]):
+        label = client or "default"
         opts = {
-            **_base_opts(client),
+            **_base_opts(client if is_youtube else None),
             "noplaylist":  True,
             "skip_download": True,
             "format":      fmt,
@@ -230,17 +355,20 @@ def proxy_download():
                             cdn_url = f.get("url")
                             break
                 if cdn_url:
-                    print(f"[/download] client={client} cdn_url resolved", flush=True)
+                    print(f"[/download] client={label} cdn_url resolved", flush=True)
                     break
         except yt_dlp.utils.DownloadError as e:
             last_err = e
             msg = str(e).lower()
-            if not any(kw in msg for kw in
-                       ["sign in", "bot", "verify", "nsig", "player", "extractor"]):
+            print(f"[/download] client={label} failed: {str(e)[:120]}", flush=True)
+            if not is_youtube or not _should_retry_youtube_client(msg):
                 break
         except Exception as e:
             last_err = e
-            break
+            msg = str(e).lower()
+            print(f"[/download] client={label} exception: {e}", flush=True)
+            if not is_youtube or not _should_retry_youtube_client(msg):
+                break
 
     if not cdn_url:
         err = str(last_err)[:300] if last_err else "Failed to resolve CDN URL"
@@ -249,9 +377,7 @@ def proxy_download():
 
     # Proxy CDN bytes to Android
     req_headers = {
-        "User-Agent":      "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/120.0.0.0 Mobile Safari/537.36",
+        "User-Agent":      YTDLP_USER_AGENT,
         "Accept":          "*/*",
         "Accept-Encoding": "identity",
     }

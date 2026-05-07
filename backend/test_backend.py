@@ -31,6 +31,7 @@ print(f"\n🔍 Testing backend at {BASE_URL}\n")
 results = [
     test("Health check", f"{BASE_URL}/health", "status"),
     test("Media info",   f"{BASE_URL}/info?url={TEST_URL}", "title"),
+    test("Playlist info", f"{BASE_URL}/playlist-info?url={TEST_URL}", "entries"),
 ]
 
 passed = sum(results)
