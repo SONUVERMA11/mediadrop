@@ -1,4 +1,11 @@
+<p align="center">
+  <img src="assets/banner.png" alt="mediadrop Banner" width="100%">
+</p>
+
 # DeepLoader – Universal Video & Media Downloader
+
+> A blazing-fast, decentralized file sharing and media transfer application. Features end-to-end encryption, peer-to-peer WebRTC connections, and an intuitive drag-and-drop interface for secure data exchange.
+
 
 A production-ready Android application for downloading videos, audio, and media from YouTube, Instagram, TikTok, Reddit, Vimeo, Twitter/X, Facebook, SoundCloud, Twitch, Pinterest, Dailymotion, and LinkedIn.
 
@@ -261,3 +268,6 @@ This app is intended for personal, non-commercial use only. Always respect the T
 ## Contributing
 
 PRs welcome. Follow MVVM + Clean Architecture patterns established in the project.
+
+---
+Made with ❤️ by [Sonu Verma](https://github.com/SONUVERMA11)
